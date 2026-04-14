@@ -1686,4 +1686,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sign = "+" if pnl >= 0 else ""
         await context.bot.send_message(
             update.effective_chat.id,
+                        f"✅ <b>Додано!</b>\n\n"
+            f"Монета: <b>{symbol}</b>\n"
+            f"Кількість: <b>{qty}</b>\n"
+            f"Куплено за: <b>{fmt(buy_price)}</b>\n"
+            f"Поточна: <b>{fmt(cur_price)}</b>\n"
+            f"PnL: <b>{sign}{fmt(pnl)}</b>",
+            reply_markup=kb_crypto(),
+            parse_mode="HTML"
+        )
+
+# ── MAIN ────────────────────────────────────────────────────────────────────
+def main():
+    init_db()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    logger.info("Bot started")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
            
