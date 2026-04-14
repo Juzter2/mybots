@@ -909,13 +909,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         floor    = g["floor_ton"] or g["ton"] or 0.0
         ton_rate = get_ton_rate()
         cur_usd  = floor * ton_rate
-        net_usd  = calc_net_gift(cur_usd)
+            net_usd  = calc_net_gift(cur_usd)
         conn = get_db()
         conn.execute(
             "UPDATE gifts SET status='forsale', floor_ton=?, current_usd=?, net_usd=?, updated_at=? WHERE id=?",
             (floor, cur_usd, net_usd, now_str(), gift_id)
         )
-             conn.commit()
+        conn.commit()
         conn.close()
         await query.edit_message_text(
             f"✅ <b>{g['name']}</b> виставлено на продаж!\n"
