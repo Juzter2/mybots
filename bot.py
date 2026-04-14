@@ -1139,7 +1139,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("💰 Кастомна ціна",   callback_data=f"giftsellcustom_{gift_id}")],
             [InlineKeyboardButton("🧾 Історія цін",     callback_data=f"gifthistory_{gift_id}"),
              InlineKeyboardButton("🗑 Видалити",         callback_data=f"giftdelete_{gift_id}")],
-          ",        callback_data="gifts_list")],
+            [InlineKeyboardButton("◀️ Назад",            callback_data="gifts_list")],
         ])
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
