@@ -1181,12 +1181,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pct   = pnl / (c["buy_price_usd"] * c["quantity"]) * 100 if c["buy_price_usd"] else 0
                 sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
-                lines.append(f"{emoji} <b>{c['symbol']}</b> — {sign}{fmt(  
-                    pnl)} ({sign}{pct:.1f}%)")
+                lines.append(f"{emoji} <b>{c['symbol']}</b> — {sign}{fmt(pnl)} ({sign}{pct:.1f}%)")
             await query.edit_message_text(
                 "\n".join(lines), reply_markup=kb_crypto(), parse_mode="HTML"
             )
-
     elif section == "cryptodel":
         coin_id = int(action)
         conn    = get_db()
