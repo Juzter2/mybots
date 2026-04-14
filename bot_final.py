@@ -33,8 +33,8 @@ from telegram.ext import (
 
 # ============== КОНФІГ ==============
 
-BOT_TOKEN = "8668053360:AAEXvcY3tplsB6XwOqXAvi-jq0nlw-Qke9A"
-ALLOWED_USER = 8772853222
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8731260970:AAFOPneNNiSpnCWPByDHe8C7P67zbFsrSQ")
+ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "8422579443"))
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.db")
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
