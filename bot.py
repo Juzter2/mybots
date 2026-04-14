@@ -1660,7 +1660,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   cur_price=cur_price, prompt_msg_id=prompt_msg.message_id,
                   main_msg_id=main_msg)
 
-       elif mode == "await_crypto_buy_price":
+    elif mode == "await_crypto_buy_price":
         try:
             buy_price = float(text.replace(",", "."))
         except ValueError:
