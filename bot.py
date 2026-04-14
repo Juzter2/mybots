@@ -869,11 +869,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ORDER BY sold_date DESC LIMIT 20", (game,)
             ).fetchall()
             conn.close()
-            if not items:
-                               await query.edit_message_text(
-                f"🗑 Вибери скін для видалення ({game_title}):",
-                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
-            )
+                        if not items:
+                await query.edit_message_text(
+                    f"🎮 {game_title} — немає проданих скінів.",
+                    reply_markup=kb_game(game), parse_mode="HTML"
+                )
                 return
             lines = [f"📋 <b>Продані {game_title}:</b>\n"]
             for it in items:
