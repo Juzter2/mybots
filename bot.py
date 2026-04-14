@@ -897,12 +897,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("◀️ Назад",            callback_data="gifts_list")],
         ])
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
-
     elif section == "giftsellfloor":
         gift_id  = int(action)
         conn     = get_db()
         g        = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
-              conn.close()
+        conn.close()
         if not g:
             await query.edit_message_text("❌ Подарунок не знайдено.", reply_markup=kb_gifts())
             return
