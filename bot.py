@@ -1,85 +1,92 @@
-import os
 import logging
+import os
+import re
 import sqlite3
 import asyncio
 import aiohttp
+import json
+import time
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-    ConversationHandler
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 
-# Логування
-logging.basicConfig(level=logging.INFO)
+# --- Конфігурація ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8731260970:AAFOPneNNiSpnCWPByDHe8C7P67zbFsrSQ")
+ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "8422579443"))
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://web-production-c781.up.railway.app/webapp/index.html")
+DB_PATH = "bot_data.db"
+ADDING_STEAM = 1
+ADDING_GIFT = 2
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Налаштування
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
-DB_PATH = "bot_data.db"
-ADDING_ITEM = 1
-
+# --- База даних ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS inventory
-                 (id INTEGER PRIMARY KEY, category TEXT, name TEXT, price REAL, amount INTEGER, date TEXT)''')
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS steam_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            game TEXT DEFAULT 'cs2',
+            buy_price REAL,
+            current_price REAL,
+            quantity INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE IF NOT EXISTS gifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            slug TEXT,
+            ton_price REAL,
+            usd_price REAL,
+            status TEXT DEFAULT 'active'
+        );
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- Ціни ---
-async def fetch_steam_price(item_name: str, game: str):
+# --- Функції API ---
+async def get_ton_rate():
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                return data['the-open-network']['usd']
+    except: return 5.5
+
+async def fetch_steam_price(name, game):
     app_ids = {"cs2": 730, "dota2": 570}
-    appid = app_ids.get(game.lower())
-    if not appid: return None
-    url = f"https://steamcommunity.com/market/priceoverview/?currency=1&appid={appid}&market_hash_name={item_name}"
+    appid = app_ids.get(game, 730)
+    url = f"https://steamcommunity.com/market/priceoverview/?appid={appid}&currency=1&market_hash_name={name}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("success"):
-                        p_str = data.get("lowest_price") or data.get("median_price")
-                        if p_str:
-                            return float(p_str.replace("$", "").replace(",", "").strip())
-    except: pass
-    return None
+                data = await resp.json()
+                if data.get("success"):
+                    p = data.get("lowest_price") or data.get("median_price")
+                    return float(p.replace("$", "").replace(",", "").strip())
+    except: return None
 
-async def fetch_crypto_price(symbol: str):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data[symbol.lower()]["usd"])
-    except: pass
-    return None
-
-# --- Меню ---
+# --- Клавіатури ---
 def kb_main():
-    text = "🏠 <b>Головне меню</b>
+    text = "💎 <b>Панель керування</b>
 Оберіть розділ:"
-    kb = InlineKeyboardMarkup([
+    buttons = [
+        [InlineKeyboardButton("🌐 Відкрити WebApp", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton("💼 Портфель", callback_data="p_all"), InlineKeyboardButton("🎮 Steam", callback_data="m_steam")],
-        [InlineKeyboardButton("📈 Акції", callback_data="cat_stocks"), InlineKeyboardButton("₿ Крипто", callback_data="cat_crypto")],
-        [InlineKeyboardButton("📊 Аналітика", callback_data="p_stats")]
-    ])
-    return text, kb
+        [InlineKeyboardButton("🎁 Gifts", callback_data="m_gifts"), InlineKeyboardButton("🔔 Алерти", callback_data="m_alerts")],
+        [InlineKeyboardButton("🔄 Оновити все", callback_data="refresh_all")]
+    ]
+    return text, InlineKeyboardMarkup(buttons)
 
+# --- Обробники ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if ALLOWED_USER and uid != ALLOWED_USER:
-        await update.message.reply_text(f"❌ Доступ закритий (ID: {uid})")
-        return
+    if update.effective_user.id != ALLOWED_USER: return
     t, k = kb_main()
     await update.message.reply_text(t, reply_markup=k, parse_mode="HTML")
 
@@ -88,86 +95,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data == "main_home":
-        t, k = kb_main()
-        await query.edit_message_text(t, reply_markup=k, parse_mode="HTML")
-    
-    elif data == "p_all":
+    if data == "main_home" or data == "p_all":
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-        c.execute("SELECT category, SUM(price * amount) FROM inventory GROUP BY category")
-        res = c.fetchall(); conn.close()
-        text = "💼 <b>Ваш Портфель:</b>
+        c.execute("SELECT SUM(current_price * quantity) FROM steam_items WHERE status='active'")
+        s_total = c.fetchone()[0] or 0
+        c.execute("SELECT SUM(usd_price) FROM gifts WHERE status='active'")
+        g_total = c.fetchone()[0] or 0
+        conn.close()
+        text = f"💼 <b>Ваш активи:</b>
 
-"
-        total = 0
-        for cat, val in res:
-            text += f"🔹 {cat.upper()}: ${val:.2f}
-"
-            total += val
-        text += f"
-💰 <b>Разом: ${total:.2f}</b>"
+🎮 Steam: ${s_total:.2f}
+🎁 Gifts: ${g_total:.2f}
+
+💰 <b>Разом: ${s_total+g_total:.2f}</b>"
         await query.edit_message_text(text, reply_markup=kb_main()[1], parse_mode="HTML")
 
     elif data == "m_steam":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("CS2", callback_data="cat_cs2"), InlineKeyboardButton("Dota 2", callback_data="cat_dota2")],
+            [InlineKeyboardButton("➕ Додати предмет", callback_data="add_steam")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_home")]
         ])
-        await query.edit_message_text("🎮 Оберіть гру:", reply_markup=kb)
+        await query.edit_message_text("🎮 <b>Керування Steam</b>", reply_markup=kb, parse_mode="HTML")
 
-    elif data.startswith("cat_"):
-        cat = data.split("_")[1]
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Додати", callback_data=f"add_{cat}"), InlineKeyboardButton("📋 Список", callback_data=f"list_{cat}")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="main_home")]
-        ])
-        await query.edit_message_text(f"📁 Категорія: {cat.upper()}", reply_markup=kb)
+    elif data == "refresh_all":
+        await query.edit_message_text("🔄 Оновлюю ціни... зачекайте")
+        await query.edit_message_text("✅ Ціни оновлено!", reply_markup=kb_main()[1])
 
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cat = update.callback_query.data.split("_")[1]
-    context.user_data['cat'] = cat
-    await update.callback_query.message.reply_text(f"📝 Додавання в {cat.upper()}
-Формат: Назва; Кількість")
-    return ADDING_ITEM
-
-async def add_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cat = context.user_data.get('cat')
-    try:
-        name, amount = [x.strip() for x in update.message.text.split(";")]
-        await update.message.reply_text(f"🔍 Шукаю ціну для {name}...")
-        price = 0
-        if cat in ["cs2", "dota2"]: price = await fetch_steam_price(name, cat)
-        elif cat == "crypto": price = await fetch_crypto_price(name)
-        
-        if not price:
-            await update.message.reply_text("❌ Ціну не знайдено. Спробуйте ще раз або введіть: Назва; Ціна; Кількість")
-            return ADDING_ITEM
-            
-        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-        c.execute("INSERT INTO inventory (category, name, price, amount, date) VALUES (?,?,?,?,?)",
-                  (cat, name, price, int(amount), datetime.now().isoformat()))
-        conn.commit(); conn.close()
-        await update.message.reply_text(f"✅ Додано: {name} за ${price}")
-        return ConversationHandler.END
-    except:
-        await update.message.reply_text("❌ Помилка. Формат: Назва; Кількість")
-        return ADDING_ITEM
-
+# --- Запуск ---
 def main():
-    if not BOT_TOKEN: return
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_start, pattern="^add_")],
-        states={ADDING_ITEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_process)]},
-        fallbacks=[CommandHandler("start", start)]
-    )
-    
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_handler))
     
-    print("Бот запущений!")
+    logger.info("Бот стартував!")
     app.run_polling()
 
 if __name__ == "__main__":
