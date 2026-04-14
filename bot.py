@@ -860,8 +860,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"🗑 Вибери скін для видалення ({game_title}):",
                 reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
-            )
-elif action == "sold":
+                     )
+
+        elif action == "sold":
             conn = get_db()
             items = conn.execute(
                 "SELECT * FROM steam_items WHERE game=? AND status='sold' "
@@ -869,10 +870,10 @@ elif action == "sold":
             ).fetchall()
             conn.close()
             if not items:
-                await query.edit_message_text(
-                    f"🎮 {game_title} — немає проданих скінів.",
-                    reply_markup=kb_game(game), parse_mode="HTML"
-                )
+                               await query.edit_message_text(
+                f"🗑 Вибери скін для видалення ({game_title}):",
+                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
+            )
                 return
             lines = [f"📋 <b>Продані {game_title}:</b>\n"]
             for it in items:
