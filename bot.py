@@ -18,7 +18,7 @@ import matplotlib.dates as mdates
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters,
 )
 
@@ -166,15 +166,15 @@ def fetch_steam_price_usd(app_id: int, name: str):
 def fetch_steam_search(query: str, app_id: int) -> list:
     encoded = urllib.parse.quote(query)
     url = (f"https://steamcommunity.com/market/search/render/"
-           f"?query={encoded}&appid={app_id}&norender=1&count=5")
+           f"?query={encoded}&appid={app_id}&norender=1&count=5&currency=1")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         results = []
         for item in (data.get("results") or []):
-            raw = item.get("sell_price_text", "")
-            price = float(re.sub(r"[^\d.]", "", raw)) / 100 if raw else 0.0
+            sell_price = item.get("sell_price", 0)
+            price = sell_price / 100.0 if sell_price else 0.0
             results.append({"name": item.get("hash_name", ""), "price_usd": price})
         return results
     except Exception as e:
@@ -242,6 +242,7 @@ def now_str() -> str:
 
 def fmt(val: float) -> str:
     return f"${val:,.2f}"
+
 # ── DB HELPERS ────────────────────────────────────────────────────────────────
 def get_steam_total(game: str = None) -> float:
     conn = get_db()
@@ -310,10 +311,10 @@ def get_pnl(days: int):
     h = get_history(days + 1)
     if len(h) < 2:
         return None, None
-    old = h[0]["portfolio_usd"]
-    new = h[-1]["portfolio_usd"]
+    old  = h[0]["portfolio_usd"]
+    new  = h[-1]["portfolio_usd"]
     diff = new - old
-    pct = diff / old * 100 if old else 0.0
+    pct  = diff / old * 100 if old else 0.0
     return diff, pct
 
 def update_all_steam() -> list:
@@ -346,244 +347,8 @@ def update_all_gifts() -> list:
     results = []
     conn = get_db()
     for g in gifts:
-        slug = g["fragment_slug"] or name_to_slug(g["name"])
-        floor = fetch_fragment_floor(slug)
-        if floor:
-            usd = floor * ton
-            net = calc_net_gift(usd)
-            conn.execute(
-                "UPDATE gifts SET floor_ton=?, current_usd=?, net_usd=?, updated_at=? WHERE id=?",
-                (floor, usd, net, now_str(), g["id"])
-            )
-            conn.execute(
-                "INSERT INTO gift_price_history(gift_id, price_usd, recorded_at) VALUES(?,?,?)",
-                (g["id"], usd, now_str())
-            )
-            results.append(f"✅ {g['name']} → {floor:.1f} TON {fmt(usd)}")
-        else:
-            results.append(f"❌ {g['name']}")
-    conn.commit()
-    conn.close()
-    return results
-
-def update_all_stocks() -> list:
-    conn = get_db()
-    stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
-    conn.close()
-    results = []
-    conn = get_db()
-    for s in stocks:
-        price = fetch_stock_price(s["ticker"])
-        if price:
-            conn.execute(
-                "UPDATE stocks SET current_price_usd=?, updated_at=? WHERE id=?",
-                (price, now_str(), s["id"])
-            )
-            results.append(f"✅ {s['ticker']} → {fmt(price)}")
-        else:
-            results.append(f"❌ {s['ticker']}")
-    conn.commit()
-    conn.close()
-    return results
-
-def update_all_crypto() -> list:
-    conn = get_db()
-    coins = conn.execute("SELECT * FROM crypto WHERE status='active'").fetchall()
-    conn.close()
-    results = []
-    conn = get_db()
-    for c in coins:
-        price = fetch_crypto_price(c["symbol"])
-        if price:
-            conn.execute(
-                "UPDATE crypto SET current_price_usd=?, updated_at=? WHERE id=?",
-                (price, now_str(), c["id"])
-            )
-            results.append(f"✅ {c['symbol']} → {fmt(price)}")
-        else:
-            results.append(f"❌ {c['symbol']}")
-    conn.commit()
-    conn.close()
-    return results
-
-# ── CHARTS ────────────────────────────────────────────────────────────────────
-def make_portfolio_chart() -> bytes:
-    history = get_history(30)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    if len(history) < 2:
-        ax.text(0.5, 0.5, "Недостатньо даних", ha="center", va="center", fontsize=14)
-    else:
-        dates = [datetime.strptime(h["date"], "%Y-%m-%d") for h in history]
-        vals  = [h["portfolio_usd"] for h in history]
-        ax.plot(dates, vals, color="#4CAF50", linewidth=2.5, marker="o", markersize=4)
-        ax.fill_between(dates, vals, alpha=0.15, color="#4CAF50")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
-        ax.set_ylabel("USD")
-        ax.set_title("Портфель за 30 днів")
-        ax.grid(True, alpha=0.3)
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-def make_pie_chart() -> bytes:
-    cs2    = get_steam_total("cs2")
-    dota   = get_steam_total("dota2")
-    gifts  = get_gifts_total()
-    stocks = get_stocks_total()
-    crypto = get_crypto_total()
-    labels, sizes, colors = [], [], []
-    if cs2    > 0: labels.append(f"CS2 ${cs2:.0f}");        sizes.append(cs2);    colors.append("#FF5722")
-    if dota   > 0: labels.append(f"Dota ${dota:.0f}");      sizes.append(dota);   colors.append("#9C27B0")
-    if gifts  > 0: labels.append(f"Подарунки ${gifts:.0f}"); sizes.append(gifts);  colors.append("#2196F3")
-    if stocks > 0: labels.append(f"Акції ${stocks:.0f}");   sizes.append(stocks); colors.append("#FF9800")
-    if crypto > 0: labels.append(f"Крипто ${crypto:.0f}");  sizes.append(crypto); colors.append("#4CAF50")
-    fig, ax = plt.subplots(figsize=(8, 8))
-    if sizes:
-        ax.pie(sizes, labels=labels, colors=colors, autopct="%1.1f%%", startangle=140)
-        ax.set_title("Склад портфеля")
-    else:
-        ax.text(0.5, 0.5, "Немає даних", ha="center", va="center", fontsize=14)
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-  # ── KEYBOARDS ─────────────────────────────────────────────────────────────────
-def kb_main():
-    total  = calc_portfolio()
-    cs2    = get_steam_total("cs2")
-    dota   = get_steam_total("dota2")
-    gifts  = get_gifts_total()
-    invest = get_stocks_total() + get_crypto_total()
-    text = (
-        f"💼 <b>Портфель</b>\n\n"
-        f"🎮 Steam CS2:      <b>{fmt(cs2)}</b>\n"
-        f"🎮 Steam Dota 2:   <b>{fmt(dota)}</b>\n"
-        f"🎁 Подарунки:      <b>{fmt(gifts)}</b>\n"
-        f"📈 Інвестиції:     <b>{fmt(invest)}</b>\n"
-        f"{'─'*26}\n"
-        f"💼 Разом:          <b>{fmt(total)}</b>"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Портфель",     callback_data="main_portfolio"),
-         InlineKeyboardButton("🎮 Steam",         callback_data="main_steam")],
-        [InlineKeyboardButton("🎁 Подарунки",    callback_data="main_gifts"),
-         InlineKeyboardButton("📈 Інвестиції",   callback_data="main_invest")],
-        [InlineKeyboardButton("🔍 Аналітика",    callback_data="main_analytics")],
-        [InlineKeyboardButton("⚙️ Налаштування", callback_data="main_settings")],
-    ])
-    return text, kb
-
-def kb_portfolio():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 Графік 30 днів", callback_data="portfolio_chart"),
-         InlineKeyboardButton("🥧 Pie-діаграма",   callback_data="portfolio_pie")],
-        [InlineKeyboardButton("⚡ Швидкий огляд",  callback_data="portfolio_quick")],
-        [InlineKeyboardButton("🏠 Додому",          callback_data="main_home")],
-    ])
-
-def kb_steam():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("CS2",    callback_data="steam_cs2"),
-         InlineKeyboardButton("Dota 2", callback_data="steam_dota2"),
-         InlineKeyboardButton("Усі",    callback_data="steam_all")],
-        [InlineKeyboardButton("🔄 Оновити ціни", callback_data="steam_update")],
-        [InlineKeyboardButton("🏠 Додому",        callback_data="main_home")],
-    ])
-
-def kb_game(game: str):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати",   callback_data=f"game_add_{game}"),
-         InlineKeyboardButton("💰 Продати",  callback_data=f"game_sell_{game}")],
-        [InlineKeyboardButton("🗑 Видалити", callback_data=f"game_delete_{game}"),
-         InlineKeyboardButton("📋 Продані",  callback_data=f"game_sold_{game}")],
-        [InlineKeyboardButton("📉 PnL",      callback_data=f"game_pnl_{game}")],
-        [InlineKeyboardButton("◀️ Назад",    callback_data="main_steam")],
-    ])
-
-def kb_gifts():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Список",        callback_data="gifts_list"),
-         InlineKeyboardButton("🏷 For sale",       callback_data="gifts_forsale")],
-        [InlineKeyboardButton("➕ Додати",         callback_data="gifts_add"),
-         InlineKeyboardButton("🔄 Оновити ціни",  callback_data="gifts_update")],
-        [InlineKeyboardButton("🏠 Додому",         callback_data="main_home")],
-    ])
-
-def kb_invest():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Акції",  callback_data="invest_stocks"),
-         InlineKeyboardButton("🪙 Крипто", callback_data="invest_crypto")],
-        [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
-    ])
-
-def kb_stocks():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати",         callback_data="stocks_add"),
-         InlineKeyboardButton("🔄 Оновити ціни",  callback_data="stocks_update")],
-        [InlineKeyboardButton("🗑 Видалити",       callback_data="stocks_deletelist"),
-         InlineKeyboardButton("📊 PnL",            callback_data="stocks_pnl")],
-        [InlineKeyboardButton("◀️ Назад",          callback_data="main_invest")],
-    ])
-
-def kb_crypto():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати",         callback_data="crypto_add"),
-         InlineKeyboardButton("🔄 Оновити ціни",  callback_data="crypto_update")],
-        [InlineKeyboardButton("🗑 Видалити",       callback_data="crypto_deletelist"),
-         InlineKeyboardButton("📊 PnL",            callback_data="crypto_pnl")],
-        [InlineKeyboardButton("◀️ Назад",          callback_data="main_invest")],
-    ])
-
-def kb_analytics():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Загальне",           callback_data="analytics_general"),
-         InlineKeyboardButton("🏆 Топ по росту",       callback_data="analytics_top")],
-        [InlineKeyboardButton("📉 Топ по просадці",    callback_data="analytics_worst"),
-         InlineKeyboardButton("📅 Тиждень vs тиждень", callback_data="analytics_weekvweek")],
-        [InlineKeyboardButton("🏠 Додому",              callback_data="main_home")],
-    ])
-
-def kb_settings():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Зробити снапшот",    callback_data="settings_snapshot"),
-         InlineKeyboardButton("🔄 Оновити всі ціни",  callback_data="settings_updateall")],
-        [InlineKeyboardButton("🏠 Додому",              callback_data="main_home")],
-    ])
-
-def kb_home():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Додому", callback_data="main_home")]])
-
-def kb_back(cb: str):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=cb)]])
-
-# ── GUARDS ────────────────────────────────────────────────────────────────────
-async def guard_cb(query) -> bool:
-    if query.from_user.id != ALLOWED_USER:
-        await query.answer("⛔ Немає доступу", show_alert=True)
-        return False
-    return True
-
-async def guard_msg(update: Update) -> bool:
-    if update.effective_user.id != ALLOWED_USER:
-        await update.message.reply_text("⛔ Немає доступу")
-        return False
-    return True
-
-# ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_msg(update):
-        return
-    set_state(update.effective_user.id, None)
-    text, kb = kb_main()
-    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-# ── CALLBACK HANDLER ──────────────────────────────────────────────────────────
+        slug = g["fragment_slug"] or
+        # ── CALLBACK HANDLER ──────────────────────────────────────────────────────────
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await guard_cb(query):
@@ -596,7 +361,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action  = parts[1] if len(parts) > 1 else ""
     param   = "_".join(parts[2:]) if len(parts) > 2 else ""
 
-    # ── MAIN ──────────────────────────────────────────────────────────────────
     if section == "main":
         if action in ("home", "start"):
             set_state(uid, None)
@@ -604,15 +368,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
         elif action == "portfolio":
-            cs2    = get_steam_total("cs2")
-            dota   = get_steam_total("dota2")
+            steam  = get_steam_total()
             gifts  = get_gifts_total()
             invest = get_stocks_total() + get_crypto_total()
-            total  = cs2 + dota + gifts + invest
+            total  = steam + gifts + invest
             text = (
                 f"📊 <b>Портфель</b>\n\n"
-                f"🎮 Steam CS2:      <b>{fmt(cs2)}</b>\n"
-                f"🎮 Steam Dota 2:   <b>{fmt(dota)}</b>\n"
+                f"🎮 Steam:          <b>{fmt(steam)}</b>\n"
                 f"🎁 Подарунки:      <b>{fmt(gifts)}</b>\n"
                 f"📈 Інвестиції:     <b>{fmt(invest)}</b>\n"
                 f"{'─'*26}\n"
@@ -633,7 +395,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "gifts":
             conn = get_db()
-            cnt = conn.execute(
+            cnt  = conn.execute(
                 "SELECT COUNT(*) FROM gifts WHERE status IN ('active','forsale')"
             ).fetchone()[0]
             conn.close()
@@ -669,7 +431,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_settings(), parse_mode="HTML"
             )
 
-    # ── PORTFOLIO ─────────────────────────────────────────────────────────────
     elif section == "portfolio":
         if action == "chart":
             await query.edit_message_text("⏳ Будую графік...")
@@ -722,37 +483,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if steam:
                 lines.append("🎮 <b>Steam:</b>")
                 for it in steam:
-                    pnl = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
+                    pnl  = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
                     sign = "+" if pnl >= 0 else ""
                     lines.append(f"  {it['name'][:25]} {fmt(it['current_price_usd']*it['quantity'])} ({sign}{fmt(pnl)})")
             if gifts:
                 lines.append("\n🎁 <b>Подарунки:</b>")
                 for g in gifts:
-                    pnl = g["current_usd"] - g["usd_at_add"]
+                    pnl  = g["current_usd"] - g["usd_at_add"]
                     sign = "+" if pnl >= 0 else ""
                     lines.append(f"  {g['name'][:25]} {fmt(g['current_usd'])} ({sign}{fmt(pnl)})")
             if stocks:
                 lines.append("\n📊 <b>Акції:</b>")
                 for s in stocks:
-                    pnl = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
+                    pnl  = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
                     sign = "+" if pnl >= 0 else ""
                     lines.append(f"  {s['ticker']} {fmt(s['current_price_usd']*s['quantity'])} ({sign}{fmt(pnl)})")
             if crypto:
                 lines.append("\n🪙 <b>Крипто:</b>")
                 for c in crypto:
-                    pnl = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
+                    pnl  = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
                     sign = "+" if pnl >= 0 else ""
                     lines.append(f"  {c['symbol']} {fmt(c['current_price_usd']*c['quantity'])} ({sign}{fmt(pnl)})")
             await query.edit_message_text(
                 "\n".join(lines), reply_markup=kb_portfolio(), parse_mode="HTML"
             )
 
-    # ── STEAM ─────────────────────────────────────────────────────────────────
     elif section == "steam":
         if action in ("cs2", "dota2", "all"):
             game_map = {"cs2": "cs2", "dota2": "dota2", "all": None}
-            game = game_map[action]
-            title = {"cs2": "CS2", "dota2": "Dota 2", "all": "Всі скіни"}[action]
+            game     = game_map[action]
+            title    = {"cs2": "CS2", "dota2": "Dota 2", "all": "Всі скіни"}[action]
+            game_key = action if action != "all" else "cs2"
             conn = get_db()
             if game:
                 items = conn.execute(
@@ -768,25 +529,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not items:
                 await query.edit_message_text(
                     f"🎮 <b>{title}</b>\n\nСписок порожній.",
-                    reply_markup=kb_game(action if action != "all" else "cs2"),
-                    parse_mode="HTML"
+                    reply_markup=kb_game(game_key), parse_mode="HTML"
                 )
                 return
             total = sum(it["current_price_usd"] * it["quantity"] for it in items)
             lines = [f"🎮 <b>{title}</b> — {fmt(total)}\n"]
             for it in items:
-                pnl  = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
-                sign = "+" if pnl >= 0 else ""
+                pnl   = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
+                sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
                 qty_str = f" x{it['quantity']}" if it["quantity"] > 1 else ""
                 lines.append(
                     f"{emoji} {it['name'][:28]}{qty_str}\n"
                     f"    {fmt(it['current_price_usd'])} | PnL: {sign}{fmt(pnl)}"
                 )
-            kb_g = kb_game(action if action != "all" else "cs2")
             await query.edit_message_text(
                 "\n".join(lines)[:4000],
-                reply_markup=kb_g, parse_mode="HTML"
+                reply_markup=kb_game(game_key), parse_mode="HTML"
             )
 
         elif action == "update":
@@ -795,7 +554,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "🔄 <b>Steam оновлено:</b>\n" + "\n".join(results) if results else "Немає активних скінів."
             await query.edit_message_text(text[:4000], reply_markup=kb_steam(), parse_mode="HTML")
 
-    # ── GAME ──────────────────────────────────────────────────────────────────
     elif section == "game":
         game       = param if param in ("cs2", "dota2") else "cs2"
         game_title = "CS2" if game == "cs2" else "Dota 2"
@@ -812,7 +570,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       main_msg_id=query.message.message_id)
 
         elif action == "sell":
-            conn = get_db()
+            conn  = get_db()
             items = conn.execute(
                 "SELECT * FROM steam_items WHERE game=? AND status='active' "
                 "ORDER BY current_price_usd DESC", (game,)
@@ -831,14 +589,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{it['name'][:30]} {fmt(p)}",
                     callback_data=f"sellitem_{it['id']}_{game}"
                 )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"game_back_{game}")])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main_steam")])
             await query.edit_message_text(
                 f"💰 Вибери скін для продажу ({game_title}):",
                 reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
             )
 
         elif action == "delete":
-            conn = get_db()
+            conn  = get_db()
             items = conn.execute(
                 "SELECT * FROM steam_items WHERE game=? AND status='active' ORDER BY name",
                 (game,)
@@ -856,14 +614,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🗑 {it['name'][:35]}",
                     callback_data=f"delitem_{it['id']}_{game}"
                 )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"game_back_{game}")])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main_steam")])
             await query.edit_message_text(
                 f"🗑 Вибери скін для видалення ({game_title}):",
                 reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
-                     )
+            )
 
         elif action == "sold":
-            conn = get_db()
+            conn  = get_db()
             items = conn.execute(
                 "SELECT * FROM steam_items WHERE game=? AND status='sold' "
                 "ORDER BY sold_date DESC LIMIT 20", (game,)
@@ -881,13 +639,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 net    = it["net_price_usd"] or 0.0
                 profit = net - buy
                 sign   = "+" if profit >= 0 else ""
-                lines.append(f"• {it['name'][:30]}\n  Куплено: {fmt(buy)} → Продано: {fmt(net)} ({sign}{fmt(profit)})")
+                lines.append(
+                    f"• {it['name'][:30]}\n"
+                    f"  Куплено: {fmt(buy
+             )} → Продано: {fmt(net)} ({sign}{fmt(profit)})")
             await query.edit_message_text(
                 "\n".join(lines)[:4000], reply_markup=kb_game(game), parse_mode="HTML"
             )
 
         elif action == "pnl":
-            conn = get_db()
+            conn  = get_db()
             items = conn.execute(
                 "SELECT * FROM steam_items WHERE game=? AND status='active' AND buy_price_usd>0",
                 (game,)
@@ -901,9 +662,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             lines = [f"📉 <b>PnL {game_title}:</b>\n"]
             for it in items:
-                pnl  = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
-                pct  = (it["current_price_usd"] - it["buy_price_usd"]) / it["buy_price_usd"] * 100 if it["buy_price_usd"] else 0
-                sign = "+" if pnl >= 0 else ""
+                pnl   = (it["current_price_usd"] - it["buy_price_usd"]) * it["quantity"]
+                pct   = (it["current_price_usd"] - it["buy_price_usd"]) / it["buy_price_usd"] * 100 if it["buy_price_usd"] else 0
+                sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
                 lines.append(f"{emoji} {it['name'][:28]}\n   {sign}{fmt(pnl)} ({sign}{pct:.1f}%)")
             await query.edit_message_text(
@@ -911,11 +672,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif action == "back":
-            await query.edit_message_text(
-                f"🎮 <b>Steam</b>", reply_markup=kb_steam(), parse_mode="HTML"
+            cs2  = get_steam_total("cs2")
+            dota = get_steam_total("dota2")
+            text = (
+                f"🎮 <b>Steam</b>\n\n"
+                f"CS2:    <b>{fmt(cs2)}</b>\n"
+                f"Dota 2: <b>{fmt(dota)}</b>\n"
+                f"Разом:  <b>{fmt(cs2+dota)}</b>"
             )
+            await query.edit_message_text(text, reply_markup=kb_steam(), parse_mode="HTML")
 
-    # ── SELL ITEM ─────────────────────────────────────────────────────────────
     elif section == "sellitem":
         item_id = int(action)
         game    = param
@@ -934,7 +700,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Нетто (−15%): <b>{fmt(net)}</b>"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Продати", callback_data=f"sellconfirm_{item_id}_{game}"),
+            [InlineKeyboardButton("✅ Продати",   callback_data=f"sellconfirm_{item_id}_{game}"),
              InlineKeyboardButton("❌ Скасувати", callback_data=f"game_sell_{game}")],
         ])
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
@@ -977,11 +743,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_game(game), parse_mode="HTML"
         )
 
-    # ── STEAM SEARCH RESULT ───────────────────────────────────────────────────
     elif section == "steamresult":
-        idx  = int(action)
-        game = param
-        state = get_state(uid)
+        idx     = int(action)
+        game    = param
+        state   = get_state(uid)
         results = state.get("search_results", [])
         if idx >= len(results):
             await query.edit_message_text("❌ Помилка.", reply_markup=kb_game(game))
@@ -990,19 +755,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name  = item["name"]
         price = item["price_usd"]
         net   = calc_net_steam(price)
-        set_state(uid, "await_steam_buy_price", game=game, name=name,
-                  cur_price=price, main_msg_id=state.get("main_msg_id"))
-        buttons = [
-            [InlineKeyboardButton(
-                f"Використати поточну {fmt(price)}",
-                callback_data=f"steamusecur_{game}_{price}"
-            )],
-            [InlineKeyboardButton("◀️ Назад", callback_data=f"game_add_{game}")],
-        ]
         prompt = await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text=f"✅ <b>{name}</b>\nПоточна ціна: {fmt(price)}\nНетто: {fmt(net)}\n\nВведи ціну покупки (USD):",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            text=(
+                f"✅ <b>{name}</b>\n"
+                f"Поточна ціна: {fmt(price)}\n"
+                f"Нетто: {fmt(net)}\n\n"
+                f"Введи ціну покупки (USD):"
+            ),
             parse_mode="HTML"
         )
         set_state(uid, "await_steam_buy_price", game=game, name=name,
@@ -1029,10 +789,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_game(game), parse_mode="HTML"
         )
 
-    # ── GIFTS ─────────────────────────────────────────────────────────────────
     elif section == "gifts":
         if action == "list":
-            conn = get_db()
+            conn  = get_db()
             gifts = conn.execute(
                 "SELECT * FROM gifts WHERE status IN ('active','forsale') ORDER BY current_usd DESC"
             ).fetchall()
@@ -1043,17 +802,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb_gifts(), parse_mode="HTML"
                 )
                 return
-            ton  = get_ton_rate()
+            ton   = get_ton_rate()
             total = sum(g["current_usd"] for g in gifts)
             lines = [f"🎁 <b>Подарунки</b> — {fmt(total)} | TON: ${ton:.3f}\n"]
             buttons = []
             for g in gifts:
-                cur  = g["current_usd"] or 0.0
-                add  = g["usd_at_add"] or 0.0
-                pnl  = cur - add
-                sign = "+" if pnl >= 0 else ""
+                cur   = g["current_usd"] or 0.0
+                add   = g["usd_at_add"] or 0.0
+                pnl   = cur - add
+                sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
-                floor_str = f"{g['floor_ton']:.1f} TON" if g["floor_ton"] else "?"
+                floor_str  = f"{g['floor_ton']:.1f} TON" if g["floor_ton"] else "?"
                 status_str = " 🏷" if g["status"] == "forsale" else ""
                 lines.append(
                     f"{emoji} {g['name'][:25]}{status_str}\n"
@@ -1070,7 +829,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif action == "forsale":
-            conn = get_db()
+            conn  = get_db()
             gifts = conn.execute(
                 "SELECT * FROM gifts WHERE status='forsale' ORDER BY current_usd DESC"
             ).fetchall()
@@ -1081,7 +840,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb_gifts(), parse_mode="HTML"
                 )
                 return
-            ton   = get_ton_rate()
             total = sum(g["current_usd"] for g in gifts)
             lines = [f"🏷 <b>For Sale</b> — {fmt(total)}\n"]
             for g in gifts:
@@ -1097,7 +855,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_state(uid, "await_gift_name", main_msg_id=query.message.message_id)
             prompt = await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="🎁 Введи назву подарунку і кількість TON через кому:\n<i>Наприклад: Plush Pepe, 10</i>",
+                text="🎁 Введи назву подарунку і кількість TON через пробіл:\n<i>Наприклад: Plush Pepe 10</i>",
                 parse_mode="HTML"
             )
             set_state(uid, "await_gift_name",
@@ -1110,7 +868,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "🔄 <b>Подарунки оновлено:</b>\n" + "\n".join(results) if results else "Немає активних подарунків."
             await query.edit_message_text(text[:4000], reply_markup=kb_gifts(), parse_mode="HTML")
 
-    # ── GIFT DETAIL ───────────────────────────────────────────────────────────
     elif section == "giftdetail":
         gift_id = int(action)
         conn    = get_db()
@@ -1144,14 +901,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
     elif section == "giftsellfloor":
-        gift_id = int(action)
-        conn    = get_db()
-        g       = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
+        gift_id  = int(action)
+        conn     = get_db()
+        g        = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
         conn.close()
         if not g:
             await query.edit_message_text("❌ Подарунок не знайдено.", reply_markup=kb_gifts())
             return
-        floor   = g["floor_ton"] or g["ton"] or 0.0
+        floor    = g["floor_ton"] or g["ton"] or 0.0
         ton_rate = get_ton_rate()
         cur_usd  = floor * ton_rate
         net_usd  = calc_net_gift(cur_usd)
@@ -1163,7 +920,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         await query.edit_message_text(
-            f"✅ <b>{g['name']}</b> виставлено на продаж!\n"
+            f"✅
+ <b>{g['name']}</b> виставлено на продаж!\n"
             f"Floor: {floor:.1f} TON | {fmt(cur_usd)} | Нетто: {fmt(net_usd)}",
             reply_markup=kb_gifts(), parse_mode="HTML"
         )
@@ -1217,10 +975,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_gifts(), parse_mode="HTML"
         )
 
-    # ── INVEST ────────────────────────────────────────────────────────────────
     elif section == "invest":
         if action == "stocks":
-            conn = get_db()
+            conn   = get_db()
             stocks = conn.execute(
                 "SELECT * FROM stocks WHERE status='active' ORDER BY current_price_usd*quantity DESC"
             ).fetchall()
@@ -1242,9 +999,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"PnL:        <b>{sign}{fmt(total_pnl)}</b>\n"
             ]
             for s in stocks:
-                val  = s["current_price_usd"] * s["quantity"]
-                pnl  = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
-                pct  = pnl / (s["buy_price_usd"] * s["quantity"]) * 100 if s["buy_price_usd"] else 0
+                val   = s["current_price_usd"] * s["quantity"]
+                pnl   = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
+                pct   = pnl / (s["buy_price_usd"] * s["quantity"]) * 100 if s["buy_price_usd"] else 0
                 sign2 = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
                 lines.append(
@@ -1256,7 +1013,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif action == "crypto":
-            conn = get_db()
+            conn  = get_db()
             coins = conn.execute(
                 "SELECT * FROM crypto WHERE status='active' ORDER BY current_price_usd*quantity DESC"
             ).fetchall()
@@ -1278,9 +1035,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"PnL:        <b>{sign}{fmt(total_pnl)}</b>\n"
             ]
             for c in coins:
-                val  = c["current_price_usd"] * c["quantity"]
-                pnl  = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
-                pct  = pnl / (c["buy_price_usd"] * c["quantity"]) * 100 if c["buy_price_usd"] else 0
+                val   = c["current_price_usd"] * c["quantity"]
+                pnl   = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
+                pct   = pnl / (c["buy_price_usd"] * c["quantity"]) * 100 if c["buy_price_usd"] else 0
                 sign2 = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
                 lines.append(
@@ -1291,7 +1048,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\n".join(lines)[:4000], reply_markup=kb_crypto(), parse_mode="HTML"
             )
 
-    # ── STOCKS ────────────────────────────────────────────────────────────────
     elif section == "stocks":
         if action == "add":
             set_state(uid, "await_stock_ticker", main_msg_id=query.message.message_id)
@@ -1311,7 +1067,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text[:4000], reply_markup=kb_stocks(), parse_mode="HTML")
 
         elif action == "deletelist":
-            conn = get_db()
+            conn   = get_db()
             stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
             conn.close()
             if not stocks:
@@ -1321,7 +1077,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             buttons = []
             for s in stocks:
-                val  = s["current_price_usd"] * s["quantity"]
                 pnl  = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
                 sign = "+" if pnl >= 0 else ""
                 buttons.append([InlineKeyboardButton(
@@ -1335,7 +1090,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif action == "pnl":
-            conn = get_db()
+            conn   = get_db()
             stocks = conn.execute(
                 "SELECT * FROM stocks WHERE status='active' AND buy_price_usd>0 "
                 "ORDER BY (current_price_usd-buy_price_usd)*quantity DESC"
@@ -1348,9 +1103,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             lines = ["📊 <b>PnL Акції:</b>\n"]
             for s in stocks:
-                pnl  = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
-                pct  = pnl / (s["buy_price_usd"] * s["quantity"]) * 100 if s["buy_price_usd"] else 0
-                sign = "+" if pnl >= 0 else ""
+                pnl   = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
+                pct   = pnl / (s["buy_price_usd"] * s["quantity"]) * 100 if s["buy_price_usd"] else 0
+                sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
                 lines.append(f"{emoji} <b>{s['ticker']}</b> — {sign}{fmt(pnl)} ({sign}{pct:.1f}%)")
             await query.edit_message_text(
@@ -1370,16 +1125,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_stocks(), parse_mode="HTML"
         )
 
-    # ── CRYPTO ────────────────────────────────────────────────────────────────
     elif section == "crypto":
         if action == "add":
             set_state(uid, "await_crypto_symbol", main_msg_id=query.message.message_id)
             prompt = await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=(
-                    "🪙 Введи символ монети:\n"
-                    "<i>Наприклад: BTC, ETH, TON, SOL, BNB, DOGE</i>"
-                ),
+                text="🪙 Введи символ монети:\n<i>Наприклад: BTC, ETH, TON, SOL, BNB, DOGE</i>",
                 parse_mode="HTML"
             )
             set_state(uid, "await_crypto_symbol",
@@ -1393,7 +1144,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text[:4000], reply_markup=kb_crypto(), parse_mode="HTML")
 
         elif action == "deletelist":
-            conn = get_db()
+            conn  = get_db()
             coins = conn.execute("SELECT * FROM crypto WHERE status='active'").fetchall()
             conn.close()
             if not coins:
@@ -1403,7 +1154,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             buttons = []
             for c in coins:
-                val  = c["current_price_usd"] * c["quantity"]
                 pnl  = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
                 sign = "+" if pnl >= 0 else ""
                 buttons.append([InlineKeyboardButton(
@@ -1417,13 +1167,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif action == "pnl":
+            conn  = get_db()
+            coins = conn.execute(
+                "SELECT * FROM crypto WHERE status='active' AND buy_price_usd>0 "
+                "ORDER BY (current_price_usd-buy_price_usd)*quantity DESC"
+            ).fetchall()
+            conn.close()
+            if not coins:
+                await query.edit_message_text(
+                    "🪙 Немає даних для PnL.", reply_markup=kb_crypto(), parse_mode="HTML"
+                )
+                return
             lines = ["🪙 <b>PnL Крипто:</b>\n"]
             for c in coins:
-                pnl  = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
-                pct  = pnl / (c["buy_price_usd"] * c["quantity"]) * 100 if c["buy_price_usd"] else 0
-                sign = "+" if pnl >= 0 else ""
+                pnl   = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
+                pct   = pnl / (c["buy_price_usd"] * c["quantity"]) * 100 if c["buy_price_usd"] else 0
+                sign  = "+" if pnl >= 0 else ""
                 emoji = "📈" if pnl >= 0 else "📉"
-                lines.append(f"{emoji} <b>{c['symbol']}</b> — {sign}{fmt(pnl)} ({sign}{pct:.1f}%)")
+                lines.append(f"{emoji} <b>{c['symbol']}</b> — {sign}{fmt(  
+                    pnl)} ({sign}{pct:.1f}%)")
             await query.edit_message_text(
                 "\n".join(lines), reply_markup=kb_crypto(), parse_mode="HTML"
             )
@@ -1441,7 +1203,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_crypto(), parse_mode="HTML"
         )
 
-    # ── ANALYTICS ─────────────────────────────────────────────────────────────
     elif section == "analytics":
         if action == "general":
             total = calc_portfolio()
@@ -1455,8 +1216,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pnl_all  = total - invested
             pct_all  = pnl_all / invested * 100 if invested else 0.0
             sign     = "+" if pnl_all >= 0 else ""
-            pnl1d, pct1d = get_pnl(1)
-            pnl7d, pct7d = get_pnl(7)
+            pnl1d,  pct1d  = get_pnl(1)
+            pnl7d,  pct7d  = get_pnl(7)
             pnl30d, pct30d = get_pnl(30)
             def pnl_str(p, pct):
                 if p is None:
@@ -1465,106 +1226,114 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return f"{s}{fmt(p)} ({s}{pct:.1f}%)"
             text = (
                 f"📊 <b>Загальна аналітика</b>\n\n"
-                f"💼 Разом:      <b>{fmt(total)}</b>\n"
-                f"💰 Інвестовано: <b>{fmt(invested)}</b>\n"
-                f"📈 PnL all-time: <b>{sign}{fmt(pnl_all)} ({sign}{pct_all:.1f}%)</b>\n\n"
-                f"⏱ PnL за 1д:  <b>{pnl_str(pnl1d, pct1d or 0)}</b>\n"
-                f"⏱ PnL за 7д:  <b>{pnl_str(pnl7d, pct7d or 0)}</b>\n"
-                f"⏱ PnL за 30д: <b>{pnl_str(pnl30d, pct30d or 0)}</b>"
+                f"💼 Разом:           <b>{fmt(total)}</b>\n"
+                f"💰 Інвестовано:     <b>{fmt(invested)}</b>\n"
+                f"📈 PnL all-time:    <b>{sign}{fmt(pnl_all)} ({sign}{pct_all:.1f}%)</b>\n\n"
+                f"⏱ PnL за 1д:       <b>{pnl_str(pnl1d,  pct1d  or 0)}</b>\n"
+                f"⏱ PnL за 7д:       <b>{pnl_str(pnl7d,  pct7d  or 0)}</b>\n"
+                f"⏱ PnL за 30д:      <b>{pnl_str(pnl30d, pct30d or 0)}</b>"
             )
             await query.edit_message_text(text, reply_markup=kb_analytics(), parse_mode="HTML")
 
-        elif action == "top":
+        elif action == "topworst":
             conn = get_db()
-            steam = conn.execute(
+            steam_top = conn.execute(
                 "SELECT name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
                 "(current_price_usd-buy_price_usd)*quantity as pnl FROM steam_items "
-                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct DESC LIMIT 5"
-            ).fetchall()
-            stocks = conn.execute(
-                "SELECT ticker as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
-                "(current_price_usd-buy_price_usd)*quantity as pnl FROM stocks "
                 "WHERE status='active' AND buy_price_usd>0 ORDER BY pct DESC LIMIT 3"
             ).fetchall()
-            crypto = conn.execute(
-                "SELECT symbol as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
-                "(current_price_usd-buy_price_usd)*quantity as pnl FROM crypto "
-                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct DESC LIMIT 3"
-            ).fetchall()
-            gifts = conn.execute(
-                "SELECT name, (current_usd-usd_at_add)/NULLIF(usd_at_add,0)*100 as pct, "
-                "(current_usd-usd_at_add) as pnl FROM gifts "
-                "WHERE status IN ('active','forsale') AND usd_at_add>0 ORDER BY pct DESC LIMIT 3"
-            ).fetchall()
-            conn.close()
-            lines = ["🏆 <b>Топ по росту</b>\n"]
-            if steam:
-                lines.append("🎮 <b>Steam:</b>")
-                for it in steam:
-                    lines.append(f"  📈 {it['name'][:28]} +{it['pct']:.1f}% (+{fmt(it['pnl'])})")
-            if gifts:
-                lines.append("\n🎁 <b>Подарунки:</b>")
-                for g in gifts:
-                    lines.append(f"  📈 {g['name'][:28]} +{g['pct']:.1f}% (+{fmt(g['pnl'])})")
-            if stocks:
-                lines.append("\n📊 <b>Акції:</b>")
-                for s in stocks:
-                    lines.append(f"  📈 {s['name']} +{s['pct']:.1f}% (+{fmt(s['pnl'])})")
-            if crypto:
-                lines.append("\n🪙 <b>Крипто:</b>")
-                for c in crypto:
-                    lines.append(f"  📈 {c['name']} +{c['pct']:.1f}% (+{fmt(c['pnl'])})")
-            await query.edit_message_text(
-                "\n".join(lines)[:4000], reply_markup=kb_analytics(), parse_mode="HTML"
-            )
-
-        elif action == "worst":
-            conn = get_db()
-            steam = conn.execute(
+            steam_worst = conn.execute(
                 "SELECT name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
                 "(current_price_usd-buy_price_usd)*quantity as pnl FROM steam_items "
-                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 5"
+                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 3"
             ).fetchall()
-            stocks = conn.execute(
+            stocks_top = conn.execute(
                 "SELECT ticker as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
                 "(current_price_usd-buy_price_usd)*quantity as pnl FROM stocks "
-                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 3"
+                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct DESC LIMIT 2"
             ).fetchall()
-            crypto = conn.execute(
+            stocks_worst = conn.execute(
+                "SELECT ticker as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
+                "(current_price_usd-buy_price_usd)*quantity as pnl FROM stocks "
+                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 2"
+            ).fetchall()
+            crypto_top = conn.execute(
                 "SELECT symbol as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
                 "(current_price_usd-buy_price_usd)*quantity as pnl FROM crypto "
-                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 3"
+                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct DESC LIMIT 2"
             ).fetchall()
-            gifts = conn.execute(
+            crypto_worst = conn.execute(
+                "SELECT symbol as name, (current_price_usd-buy_price_usd)/NULLIF(buy_price_usd,0)*100 as pct, "
+                "(current_price_usd-buy_price_usd)*quantity as pnl FROM crypto "
+                "WHERE status='active' AND buy_price_usd>0 ORDER BY pct ASC LIMIT 2"
+            ).fetchall()
+            gifts_top = conn.execute(
                 "SELECT name, (current_usd-usd_at_add)/NULLIF(usd_at_add,0)*100 as pct, "
                 "(current_usd-usd_at_add) as pnl FROM gifts "
-                "WHERE status IN ('active','forsale') AND usd_at_add>0 ORDER BY pct ASC LIMIT 3"
+                "WHERE status IN ('active','forsale') AND usd_at_add>0 ORDER BY pct DESC LIMIT 2"
+            ).fetchall()
+            gifts_worst = conn.execute(
+                "SELECT name, (current_usd-usd_at_add)/NULLIF(usd_at_add,0)*100 as pct, "
+                "(current_usd-usd_at_add) as pnl FROM gifts "
+                "WHERE status IN ('active','forsale') AND usd_at_add>0 ORDER BY pct ASC LIMIT 2"
             ).fetchall()
             conn.close()
-            lines = ["📉 <b>Топ по просадці</b>\n"]
-            if steam:
-                lines.append("🎮 <b>Steam:</b>")
-                for it in steam:
-                    lines.append(f"  📉 {it['name'][:28]} {it['pct']:.1f}% ({fmt(it['pnl'])})")
-            if gifts:
-                lines.append("\n🎁 <b>Подарунки:</b>")
-                for g in gifts:
-                    lines.append(f"  📉 {g['name'][:28]} {g['pct']:.1f}% ({fmt(g['pnl'])})")
-            if stocks:
-                lines.append("\n📊 <b>Акції:</b>")
-                for s in stocks:
-                    lines.append(f"  📉 {s['name']} {s['pct']:.1f}% ({fmt(s['pnl'])})")
-            if crypto:
-                lines.append("\n🪙 <b>Крипто:</b>")
-                for c in crypto:
-                    lines.append(f"  📉 {c['name']} {c['pct']:.1f}% ({fmt(c['pnl'])})")
+            lines = ["🏆📉 <b>Топ ріст / просадка</b>\n"]
+            lines.append("🎮 <b>Steam — Ріст:</b>")
+            for it in steam_top:
+                sign = "+" if it["pnl"] >= 0 else ""
+                lines.append(f"  📈 {it['name'][:25]} {sign}{it['pct']:.1f}% ({sign}{fmt(it['pnl'])})")
+            if not steam_top:
+                lines.append("  —")
+            lines.append("🎮 <b>Steam — Просадка:</b>")
+            for it in steam_worst:
+                sign = "+" if it["pnl"] >= 0 else ""
+                lines.append(f"  📉 {it['name'][:25]} {sign}{it['pct']:.1f}% ({sign}{fmt(it['pnl'])})")
+            if not steam_worst:
+                lines.append("  —")
+            lines.append("\n🎁 <b>Подарунки — Ріст:</b>")
+            for g in gifts_top:
+                sign = "+" if g["pnl"] >= 0 else ""
+                lines.append(f"  📈 {g['name'][:25]} {sign}{g['pct']:.1f}% ({sign}{fmt(g['pnl'])})")
+            if not gifts_top:
+                lines.append("  —")
+            lines.append("🎁 <b>Подарунки — Просадка:</b>")
+            for g in gifts_worst:
+                sign = "+" if g["pnl"] >= 0 else ""
+                lines.append(f"  📉 {g['name'][:25]} {sign}{g['pct']:.1f}% ({sign}{fmt(g['pnl'])})")
+            if not gifts_worst:
+                lines.append("  —")
+            lines.append("\n📊 <b>Акції — Ріст:</b>")
+            for s in stocks_top:
+                sign = "+" if s["pnl"] >= 0 else ""
+                lines.append(f"  📈 {s['name']} {sign}{s['pct']:.1f}% ({sign}{fmt(s['pnl'])})")
+            if not stocks_top:
+                lines.append("  —")
+            lines.append("📊 <b>Акції — Просадка:</b>")
+            for s in stocks_worst:
+                sign = "+" if s["pnl"] >= 0 else ""
+                lines.append(f"  📉 {s['name']} {sign}{s['pct']:.1f}% ({sign}{fmt(s['pnl'])})")
+            if not stocks_worst:
+                lines.append("  —")
+            lines.append("\n🪙 <b>Крипто — Ріст:</b>")
+            for c in crypto_top:
+                sign = "+" if c["pnl"] >= 0 else ""
+                lines.append(f"  📈 {c['name']} {sign}{c['pct']:.1f}% ({sign}{fmt(c['pnl'])})")
+            if not crypto_top:
+                lines.append("  —")
+            lines.append("🪙 <b>Крипто — Просадка:</b>")
+            for c in crypto_worst:
+                sign = "+" if c["pnl"] >= 0 else ""
+                lines.append(f"  📉 {c['name']} {sign}{c['pct']:.1f}% ({sign}{fmt(c['pnl'])})")
+            if not crypto_worst:
+                lines.append("  —")
             await query.edit_message_text(
                 "\n".join(lines)[:4000], reply_markup=kb_analytics(), parse_mode="HTML"
             )
 
         elif action == "weekvweek":
-            history = get_history(21)
-            today   = datetime.utcnow().date()
+            history    = get_history(21)
+            today      = datetime.utcnow().date()
             week_start = today - timedelta(days=today.weekday())
             prev_week  = week_start - timedelta(days=7)
             curr_vals  = [h for h in history if str(week_start) <= h["date"] <= str(today)]
@@ -1585,7 +1354,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\n".join(lines), reply_markup=kb_analytics(), parse_mode="HTML"
             )
 
-    # ── SETTINGS ──────────────────────────────────────────────────────────────
     elif section == "settings":
         if action == "snapshot":
             val = await asyncio.to_thread(record_snapshot)
@@ -1596,8 +1364,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "updateall":
             await query.edit_message_text("⏳ Оновлюю всі ціни...")
-            s = await asyncio.to_thread(update_all_steam)
-            g = await asyncio.to_thread(update_all_gifts)
+            s  = await asyncio.to_thread(update_all_steam)
+            g  = await asyncio.to_thread(update_all_gifts)
             st = await asyncio.to_thread(update_all_stocks)
             cr = await asyncio.to_thread(update_all_crypto)
             total = calc_portfolio()
@@ -1610,10 +1378,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\n💼 Портфель: <b>{fmt(total)}</b>"
             ]
             await query.edit_message_text(
-                "\n".join(lines), reply_markup=kb_settings(),
-              parse_mode="HTML"
-            )                  
-# ── MESSAGE HANDLER ───────────────────────────────────────────────────────────
+                "\n".join(lines), reply_markup=kb_settings(), parse_mode="HTML"
+            )
+        # ── MESSAGE HANDLER ───────────────────────────────────────────────────────────
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -1637,7 +1404,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # ── STEAM SEARCH ──────────────────────────────────────────────────────────
     if mode == "await_steam_search":
         game    = state.get("game", "cs2")
         app_id  = APP_ID_CS2 if game == "cs2" else APP_ID_DOTA2
@@ -1645,7 +1411,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = await asyncio.to_thread(fetch_steam_search, text, app_id)
         await clean_prompts()
         if not results:
-            msg = await context.bot.send_message(
+            await context.bot.send_message(
                 update.effective_chat.id,
                 f"❌ Нічого не знайдено для «{text}» в {title}.",
                 reply_markup=kb_game(game)
@@ -1668,7 +1434,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
-    # ── STEAM BUY PRICE ───────────────────────────────────────────────────────
     elif mode == "await_steam_buy_price":
         try:
             buy_price = float(text.replace(",", "."))
@@ -1694,44 +1459,41 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_state(uid, None)
         pnl  = cur_price - buy_price
         sign = "+" if pnl >= 0 else ""
-        msg  = (
+        await context.bot.send_message(
+            update.effective_chat.id,
             f"✅ <b>Додано!</b>\n\n"
             f"Назва: <b>{name}</b>\n"
             f"Куплено за: <b>{fmt(buy_price)}</b>\n"
             f"Поточна ціна: <b>{fmt(cur_price)}</b>\n"
             f"Нетто: <b>{fmt(net)}</b>\n"
-            f"PnL: <b>{sign}{fmt(pnl)}</b>"
-        )
-        await context.bot.send_message(
-            update.effective_chat.id, msg,
+            f"PnL: <b>{sign}{fmt(pnl)}</b>",
             reply_markup=kb_game(game), parse_mode="HTML"
         )
 
-    # ── GIFT NAME + TON ───────────────────────────────────────────────────────
     elif mode == "await_gift_name":
-        parts = [p.strip() for p in text.split(",")]
+        parts = text.split()
         if len(parts) < 2:
             await context.bot.send_message(
                 update.effective_chat.id,
-                "❌ Формат: <b>Назва, TON</b>\nНаприклад: Plush Pepe, 10",
+                "❌ Формат: <b>Назва TON</b>\nНаприклад: Plush Pepe 10",
                 parse_mode="HTML"
             )
             return
-        name = parts[0]
         try:
-            ton = float(parts[1].replace(",", "."))
+            ton  = float(parts[-1].replace(",", "."))
+            name = " ".join(parts[:-1])
         except ValueError:
             await context.bot.send_message(
                 update.effective_chat.id,
-                "❌ Невірна кількість TON. Наприклад: Plush Pepe, 10"
+                "❌ Останнє слово має бути кількість TON.\nНаприклад: Plush Pepe 10"
             )
             return
         await clean_prompts()
-        ton_rate = await asyncio.to_thread(get_ton_rate)
-        slug     = name_to_slug(name)
-        floor    = await asyncio.to_thread(fetch_fragment_floor, slug)
-        cur_usd  = (floor or ton) * ton_rate
-        net_usd  = calc_net_gift(cur_usd)
+        ton_rate  = await asyncio.to_thread(get_ton_rate)
+        slug      = name_to_slug(name)
+        floor     = await asyncio.to_thread(fetch_fragment_floor, slug)
+        cur_usd   = (floor or ton) * ton_rate
+        net_usd   = calc_net_gift(cur_usd)
         floor_str = f"{floor:.1f} TON" if floor else "не знайдено"
         set_state(uid, "await_gift_confirm",
                   name=name, ton=ton, floor=floor, ton_rate=ton_rate,
@@ -1752,7 +1514,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb, parse_mode="HTML"
         )
 
-    # ── GIFT SELL CUSTOM TON ──────────────────────────────────────────────────
     elif mode == "await_gift_sell_ton":
         try:
             ton_sell = float(text.replace(",", "."))
@@ -1782,7 +1543,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_gifts(), parse_mode="HTML"
         )
 
-    # ── STOCK TICKER ──────────────────────────────────────────────────────────
     elif mode == "await_stock_ticker":
         ticker = text.upper().strip()
         await clean_prompts()
@@ -1796,21 +1556,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_state(uid, None)
             return
         set_state(uid, "await_stock_qty", ticker=ticker, cur_price=price, main_msg_id=main_msg)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"Використати поточну {fmt(price)}",
-                callback_data=f"stockusecur_{ticker}_{price}"
-            )],
-        ])
         prompt_msg = await context.bot.send_message(
             update.effective_chat.id,
             f"📊 <b>{ticker}</b> — поточна ціна: <b>{fmt(price)}</b>\n\nВведи кількість акцій:",
-            reply_markup=kb, parse_mode="HTML"
+            parse_mode="HTML"
         )
         set_state(uid, "await_stock_qty", ticker=ticker, cur_price=price,
                   prompt_msg_id=prompt_msg.message_id, main_msg_id=main_msg)
 
-    # ── STOCK QTY ─────────────────────────────────────────────────────────────
     elif mode == "await_stock_qty":
         try:
             qty = float(text.replace(",", "."))
@@ -1825,22 +1578,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur_price = state.get("cur_price", 0.0)
         set_state(uid, "await_stock_buy_price", ticker=ticker, qty=qty,
                   cur_price=cur_price, main_msg_id=main_msg)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"Використати поточну {fmt(cur_price)}",
-                callback_data=f"stockusecur_{ticker}_{cur_price}"
-            )],
-        ])
         prompt_msg = await context.bot.send_message(
             update.effective_chat.id,
             f"📊 <b>{ticker}</b> x{qty}\n\nВведи ціну покупки (USD):",
-            reply_markup=kb, parse_mode="HTML"
+            parse_mode="HTML"
         )
         set_state(uid, "await_stock_buy_price", ticker=ticker, qty=qty,
                   cur_price=cur_price, prompt_msg_id=prompt_msg.message_id,
                   main_msg_id=main_msg)
 
-    # ── STOCK BUY PRICE ───────────────────────────────────────────────────────
     elif mode == "await_stock_buy_price":
         try:
             buy_price = float(text.replace(",", "."))
@@ -1876,7 +1622,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_stocks(), parse_mode="HTML"
         )
 
-    # ── CRYPTO SYMBOL ─────────────────────────────────────────────────────────
     elif mode == "await_crypto_symbol":
         symbol = text.upper().strip()
         await clean_prompts()
@@ -1899,8 +1644,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_state(uid, "await_crypto_qty", symbol=symbol, cur_price=price,
                   prompt_msg_id=prompt_msg.message_id, main_msg_id=main_msg)
 
-    #
-        # ── CRYPTO QTY ────────────────────────────────────────────────────────────
     elif mode == "await_crypto_qty":
         try:
             qty = float(text.replace(",", "."))
@@ -1915,23 +1658,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur_price = state.get("cur_price", 0.0)
         set_state(uid, "await_crypto_buy_price", symbol=symbol, qty=qty,
                   cur_price=cur_price, main_msg_id=main_msg)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"Використати поточну {fmt(cur_price)}",
-                callback_data=f"cryptousecur_{symbol}_{cur_price}"
-            )],
-        ])
         prompt_msg = await context.bot.send_message(
             update.effective_chat.id,
             f"🪙 <b>{symbol}</b> x{qty}\n\nВведи ціну покупки (USD):",
-            reply_markup=kb, parse_mode="HTML"
+            parse_mode="HTML"
         )
         set_state(uid, "await_crypto_buy_price", symbol=symbol, qty=qty,
                   cur_price=cur_price, prompt_msg_id=prompt_msg.message_id,
                   main_msg_id=main_msg)
 
-    # ── CRYPTO BUY PRICE ──────────────────────────────────────────────────────
-    elif mode == "await_crypto_buy_price":
+       elif mode == "await_crypto_buy_price":
         try:
             buy_price = float(text.replace(",", "."))
         except ValueError:
@@ -1957,229 +1693,4 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sign = "+" if pnl >= 0 else ""
         await context.bot.send_message(
             update.effective_chat.id,
-            f"✅ <b>Додано!</b>\n\n"
-            f"Монета: <b>{symbol}</b>\n"
-            f"Кількість: <b>{qty}</b>\n"
-            f"Куплено за: <b>{fmt(buy_price)}</b>\n"
-            f"Поточна: <b>{fmt(cur_price)}</b>\n"
-            f"PnL: <b>{sign}{fmt(pnl)}</b>",
-            reply_markup=kb_crypto(), parse_mode="HTML"
-        )
-
-    else:
-        set_state(uid, None)
-        t, kb = kb_main()
-        await context.bot.send_message(
-            update.effective_chat.id, t,
-            reply_markup=kb, parse_mode="HTML"
-        )
-
-
-# ── INLINE CONFIRMS ───────────────────────────────────────────────────────────
-async def handle_gift_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not await guard_cb(query):
-        return
-    await query.answer()
-    uid   = query.from_user.id
-    state = get_state(uid)
-    data  = query.data
-
-    if data == "giftconfirm_yes":
-        if not state or state.get("mode") != "await_gift_confirm":
-            await query.edit_message_text("❌ Помилка стану.", reply_markup=kb_gifts())
-            return
-        name     = state.get("name", "")
-        ton      = state.get("ton", 0.0)
-        floor    = state.get("floor")
-        ton_rate = state.get("ton_rate", 0.0)
-        cur_usd  = state.get("cur_usd", 0.0)
-        net_usd  = state.get("net_usd", 0.0)
-        slug     = state.get("slug", name_to_slug(name))
-        conn     = get_db()
-        conn.execute(
-            "INSERT INTO gifts(name,fragment_slug,ton,floor_ton,usd_at_add,current_usd,"
-            "net_usd,ton_rate_at_add,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (name, slug, ton, floor or ton, cur_usd, cur_usd,
-             net_usd, ton_rate, "active", now_str(), now_str())
-        )
-        gid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute(
-            "INSERT INTO gift_price_history(gift_id,price_usd,recorded_at) VALUES(?,?,?)",
-            (gid, cur_usd, now_str())
-        )
-        conn.commit()
-        conn.close()
-        set_state(uid, None)
-        await query.edit_message_text(
-            f"✅ <b>Додано!</b>\n\n"
-            f"🎁 {name}\n"
-            f"TON: {ton:.1f} | {fmt(cur_usd)} | Нетто: {fmt(net_usd)}",
-            reply_markup=kb_gifts(), parse_mode="HTML"
-        )
-
-    elif data == "giftconfirm_no":
-        set_state(uid, None)
-        await query.edit_message_text(
-            "❌ Скасовано.", reply_markup=kb_gifts()
-        )
-
-async def handle_stockusecur(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not await guard_cb(query):
-        return
-    await query.answer()
-    uid   = query.from_user.id
-    parts = query.data.split("_")
-    ticker    = parts[1]
-    cur_price = float(parts[2])
-    state     = get_state(uid)
-    qty       = state.get("qty", 1.0)
-    conn      = get_db()
-    conn.execute(
-        "INSERT INTO stocks(ticker,name,quantity,buy_price_usd,current_price_usd,"
-        "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-        (ticker, ticker, qty, cur_price, cur_price, "active", now_str(), now_str())
-    )
-    conn.commit()
-    conn.close()
-    set_state(uid, None)
-    await query.edit_message_text(
-        f"✅ <b>Додано!</b>\n\n"
-        f"Тикер: <b>{ticker}</b>\n"
-        f"Кількість: <b>{qty}</b>\n"
-        f"Ціна: <b>{fmt(cur_price)}</b>\n"
-        f"PnL: <b>$0.00</b>",
-        reply_markup=kb_stocks(), parse_mode="HTML"
-    )
-
-async def handle_cryptousecur(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not await guard_cb(query):
-        return
-    await query.answer()
-    uid   = query.from_user.id
-    parts = query.data.split("_")
-    symbol    = parts[1]
-    cur_price = float(parts[2])
-    state     = get_state(uid)
-    qty       = state.get("qty", 1.0)
-    conn      = get_db()
-    conn.execute(
-        "INSERT INTO crypto(symbol,name,quantity,buy_price_usd,current_price_usd,"
-        "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-        (symbol, symbol, qty, cur_price, cur_price, "active", now_str(), now_str())
-    )
-    conn.commit()
-    conn.close()
-    set_state(uid, None)
-    await query.edit_message_text(
-        f"✅ <b>Додано!</b>\n\n"
-        f"Монета: <b>{symbol}</b>\n"
-        f"Кількість: <b>{qty}</b>\n"
-        f"Ціна: <b>{fmt(cur_price)}</b>\n"
-        f"PnL: <b>$0.00</b>",
-        reply_markup=kb_crypto(), parse_mode="HTML"
-    )
-
-# ── JOBS ──────────────────────────────────────────────────────────────────────
-async def job_daily_snapshot(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        val = await asyncio.to_thread(record_snapshot)
-        logger.info(f"Daily snapshot: {val:.2f}")
-    except Exception as e:
-        logger.exception(f"job_daily_snapshot error: {e}")
-
-async def job_auto_update(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await asyncio.to_thread(update_all_steam)
-        await asyncio.to_thread(update_all_gifts)
-        await asyncio.to_thread(update_all_stocks)
-        await asyncio.to_thread(update_all_crypto)
-        logger.info("Auto price update done.")
-    except Exception as e:
-        logger.exception(f"job_auto_update error: {e}")
-
-async def job_morning_digest(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        total  = calc_portfolio()
-        pnl1d, pct1d = get_pnl(1)
-        cs2    = get_steam_total("cs2")
-        dota   = get_steam_total("dota2")
-        gifts  = get_gifts_total()
-        stocks = get_stocks_total()
-        crypto = get_crypto_total()
-        pnl_str = ""
-        if pnl1d is not None:
-            sign = "+" if pnl1d >= 0 else ""
-            pnl_str = f"\n📈 За ніч: {sign}{fmt(pnl1d)} ({sign}{pct1d:.1f}%)"
-        text = (
-            f"☀️ <b>Ранковий дайджест</b>{pnl_str}\n\n"
-            f"💼 Портфель: <b>{fmt(total)}</b>\n"
-            f"🎮 Steam CS2: <b>{fmt(cs2)}</b>\n"
-            f"🎮 Steam Dota: <b>{fmt(dota)}</b>\n"
-            f"🎁 Подарунки: <b>{fmt(gifts)}</b>\n"
-            f"📊 Акції: <b>{fmt(stocks)}</b>\n"
-            f"🪙 Крипто: <b>{fmt(crypto)}</b>"
-        )
-        await context.bot.send_message(
-            chat_id=ALLOWED_USER, text=text, parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.exception(f"job_morning_digest error: {e}")
-
-async def job_daily_backup(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        backup_name = f"bot_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(DB_FILE, os.path.join(BACKUP_DIR, backup_name))
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        for fname in os.listdir(BACKUP_DIR):
-            fpath = os.path.join(BACKUP_DIR, fname)
-            if os.path.getmtime(fpath) < cutoff.timestamp():
-                os.remove(fpath)
-        logger.info(f"Backup created: {backup_name}")
-    except Exception as e:
-        logger.exception(f"job_daily_backup error: {e}")
-
-# ── POST INIT ─────────────────────────────────────────────────────────────────
-async def post_init(app):
-    init_db()
-    try:
-        await app.bot.send_message(
-            chat_id=ALLOWED_USER,
-            text="🚀 <b>Бот запущено!</b>\nВсі системи працюють.",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.warning(f"Could not send startup message: {e}")
-
-# ── MAIN ──────────────────────────────────────────────────────────────────────
-def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu",  cmd_start))
-    app.add_handler(CallbackQueryHandler(handle_gift_confirm,  pattern="^giftconfirm_"))
-    app.add_handler(CallbackQueryHandler(handle_stockusecur,   pattern="^stockusecur_"))
-    app.add_handler(CallbackQueryHandler(handle_cryptousecur,  pattern="^cryptousecur_"))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    jq = app.job_queue
-    from datetime import time as dtime
-    jq.run_daily(job_morning_digest,  time=dtime(hour=6,  minute=0))
-    jq.run_daily(job_daily_snapshot,  time=dtime(hour=23, minute=0))
-    jq.run_daily(job_daily_backup,    time=dtime(hour=3,  minute=0))
-    jq.run_repeating(job_auto_update, interval=3600, first=60)
-
-    logger.info("Bot started.")
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+           
