@@ -915,11 +915,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "UPDATE gifts SET status='forsale', floor_ton=?, current_usd=?, net_usd=?, updated_at=? WHERE id=?",
             (floor, cur_usd, net_usd, now_str(), gift_id)
         )
-        conn.commit()
+             conn.commit()
         conn.close()
         await query.edit_message_text(
-            f"✅
- <b>{g['name']}</b> виставлено на продаж!\n"
+            f"✅ <b>{g['name']}</b> виставлено на продаж!\n"
             f"Floor: {floor:.1f} TON | {fmt(cur_usd)} | Нетто: {fmt(net_usd)}",
             reply_markup=kb_gifts(), parse_mode="HTML"
         )
