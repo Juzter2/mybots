@@ -15,33 +15,23 @@ from telegram.ext import (
     ConversationHandler
 )
 
-# Logging configuration
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Config
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
 DB_PATH = "bot_data.db"
-
-# Conversation states
 ADDING_ITEM = 1
 
 def init_db():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS inventory 
-                     (id INTEGER PRIMARY KEY, game TEXT, name TEXT, price REAL, amount INTEGER, date TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS assets 
-                     (id INTEGER PRIMARY KEY, type TEXT, name TEXT, val REAL, date TEXT)''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"DB Error: {e}")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS inventory 
+                 (id INTEGER PRIMARY KEY, game TEXT, name TEXT, price REAL, amount INTEGER, date TEXT)''')
+    conn.commit()
+    conn.close()
 
 init_db()
 
@@ -55,9 +45,10 @@ async def fetch_steam_price(item_name: str, game: str):
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get("success") and (data.get("lowest_price") or data.get("median_price")):
+                    if data.get("success"):
                         p_str = data.get("lowest_price") or data.get("median_price")
-                        return float(p_str.replace("$", "").replace(",", "").strip())
+                        if p_str:
+                            return float(p_str.replace("$", "").replace(",", "").strip())
     except: pass
     return None
 
@@ -119,11 +110,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t, k = kb_main()
         await query.edit_message_text(t, reply_markup=k, parse_mode="HTML")
     elif data == "main_portfolio":
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
+        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
         c.execute("SELECT game, SUM(price * amount) FROM inventory GROUP BY game")
-        totals = c.fetchall()
-        conn.close()
+        totals = c.fetchall(); conn.close()
         text = "📊 <b>Загальний Портфель</b>
 "
         grand_total = 0
@@ -191,7 +180,7 @@ async def process_item_addition(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("🔍 Шукаю ціну...")
             price = await fetch_steam_price(name, game)
             if not price: await update.message.reply_text("❌ Ціну не знайдено. Введіть: Назва; Ціна; Кількість"); return ADDING_ITEM
-        elif len(p) == 3: name, price, amount = p[0], float(p[1].replace(",")), int(p[2])
+        elif len(p) == 3: name, price, amount = p[0], float(p[1].replace(",", ".")), int(p[2])
         else: return ADDING_ITEM
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
         c.execute("INSERT INTO inventory (game, name, price, amount, date) VALUES (?,?,?,?,?)", (game, name, price, amount, datetime.now().isoformat()))
