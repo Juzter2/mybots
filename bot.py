@@ -1,13 +1,42 @@
 import os
 import logging
+import sqlite3
+import json
+import asyncio
+import aiohttp
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Config
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
+DB_PATH = "bot_data.db"
+
+# DB Initialization
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS inventory 
+                 (id INTEGER PRIMARY KEY, type TEXT, name TEXT, price REAL, amount INTEGER, date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS gifts 
+                 (id INTEGER PRIMARY KEY, name TEXT, price REAL, status TEXT, date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings 
+                 (key TEXT PRIMARY KEY, value TEXT)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Steam API Helper (Placeholder for real integration)
+async def get_steam_price(item_name, game="cs2"):
+    # В реальному боті тут буде запит до Steam Market API або стороннього сервісу
+    # Для демонстрації повертаємо випадкову ціну
+    return 15.50
 
 # Guards
 async def guard_cb(query):
@@ -26,7 +55,9 @@ async def guard_msg(update: Update):
 
 # Keyboards
 def kb_main():
-    text = "🏠 <b>Головне меню</b>\n\nОбери розділ:"
+    text = "🏠 <b>Головне меню</b>
+
+Обери розділ:"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Портфель", callback_data="main_portfolio"),
          InlineKeyboardButton("🎮 Steam", callback_data="main_steam")],
@@ -54,37 +85,6 @@ def kb_steam():
         [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
     ])
 
-def kb_gifts():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Список", callback_data="gifts_list"),
-         InlineKeyboardButton("🏷 For Sale", callback_data="gifts_forsale")],
-        [InlineKeyboardButton("➕ Додати", callback_data="gifts_add"),
-         InlineKeyboardButton("🔄 Оновити", callback_data="gifts_update")],
-        [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
-    ])
-
-def kb_invest():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Акції", callback_data="invest_stocks"),
-         InlineKeyboardButton("🪙 Крипто", callback_data="invest_crypto")],
-        [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
-    ])
-
-def kb_analytics():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Загальна аналітика", callback_data="analytics_general")],
-        [InlineKeyboardButton("🏆 Топ ріст / просадка", callback_data="analytics_topworst")],
-        [InlineKeyboardButton("📅 Тиждень vs тиждень", callback_data="analytics_weekvweek")],
-        [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
-    ])
-
-def kb_settings():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Зберегти снапшот", callback_data="settings_snapshot")],
-        [InlineKeyboardButton("🔄 Оновити всі ціни", callback_data="settings_updateall")],
-        [InlineKeyboardButton("🏠 Додому", callback_data="main_home")],
-    ])
-
 def kb_game(game: str):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Додати", callback_data=f"game_add_{game}"),
@@ -95,93 +95,42 @@ def kb_game(game: str):
         [InlineKeyboardButton("◀️ Назад", callback_data="main_steam")],
     ])
 
-def kb_stocks():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати", callback_data="stocks_add"),
-         InlineKeyboardButton("🔄 Оновити", callback_data="stocks_update")],
-        [InlineKeyboardButton("🗑 Видалити", callback_data="stocks_deletelist"),
-         InlineKeyboardButton("📉 PnL", callback_data="stocks_pnl")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="main_invest")],
-    ])
-
-def kb_crypto():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати", callback_data="crypto_add"),
-         InlineKeyboardButton("🔄 Оновити", callback_data="crypto_update")],
-        [InlineKeyboardButton("🗑 Видалити", callback_data="crypto_deletelist"),
-         InlineKeyboardButton("📉 PnL", callback_data="crypto_pnl")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="main_invest")],
-    ])
-
-def kb_back(data: str):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=data)]])
-
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_msg(update):
-        return
+    if not await guard_msg(update): return
     text, kb = kb_main()
     await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not await guard_cb(query):
-        return
+    if not await guard_cb(query): return
     await query.answer()
     
     data = query.data
-    parts = data.split("_")
-    section = parts[0]
-    action = parts[1] if len(parts) > 1 else ""
-    
-    if section == "main":
-        if action in ("home", "start"):
-            text, kb = kb_main()
-            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
-        elif action == "portfolio":
-            await query.edit_message_text(
-                "📊 <b>Портфель</b>\n\nФункція в розробці...",
-                reply_markup=kb_portfolio(),
-                parse_mode="HTML"
-            )
-        elif action == "steam":
-            await query.edit_message_text(
-                "🎮 <b>Steam</b>\n\nФункція в розробці...",
-                reply_markup=kb_steam(),
-                parse_mode="HTML"
-            )
-        elif action == "gifts":
-            await query.edit_message_text(
-                "🎁 <b>Подарунки</b>\n\nФункція в розробці...",
-                reply_markup=kb_gifts(),
-                parse_mode="HTML"
-            )
-        elif action == "invest":
-            await query.edit_message_text(
-                "📈 <b>Інвестиції</b>\n\nФункція в розробці...",
-                reply_markup=kb_invest(),
-                parse_mode="HTML"
-            )
-        elif action == "analytics":
-            await query.edit_message_text(
-                "🔍 <b>Аналітика</b>\n\nФункція в розробці...",
-                reply_markup=kb_analytics(),
-                parse_mode="HTML"
-            )
-        elif action == "settings":
-            await query.edit_message_text(
-                "⚙️ <b>Налаштування</b>\n\nФункція в розробці...",
-                reply_markup=kb_settings(),
-                parse_mode="HTML"
-            )
+    if data == "main_home":
+        text, kb = kb_main()
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    elif data == "main_portfolio":
+        await query.edit_message_text("📊 <b>Ваш Портфель</b>
+
+Тут буде огляд всіх ваших активів.", 
+                                      reply_markup=kb_portfolio(), parse_mode="HTML")
+    elif data == "main_steam":
+        await query.edit_message_text("🎮 <b>Steam Інвентар</b>
+
+Оберіть гру:", 
+                                      reply_markup=kb_steam(), parse_mode="HTML")
+    elif data.startswith("steam_"):
+        game = data.split("_")[1]
+        if game in ["cs2", "dota2"]:
+            await query.edit_message_text(f"🎮 <b>Управління {game.upper()}</b>", 
+                                          reply_markup=kb_game(game), parse_mode="HTML")
 
 def main():
-    logger.info("Starting bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    logger.info("Bot started!")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
