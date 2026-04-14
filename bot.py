@@ -347,7 +347,7 @@ def update_all_gifts() -> list:
     results = []
     conn = get_db()
     for g in gifts:
-        slug = g["fragment_slug"] or
+        slug = g["fragment_slug"] or name_to_slug(g["name"])
         # ── CALLBACK HANDLER ──────────────────────────────────────────────────────────
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
