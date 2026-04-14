@@ -641,7 +641,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sign   = "+" if profit >= 0 else ""
                 lines.append(
                     f"• {it['name'][:30]}\n"
-                    f"  Куплено: {fmt(buy
+                               lines.append(
+                    f"• {it['name'][:30]}\n"
+                    f"  Куплено: {fmt(buy)} → Продано: {fmt(net)} ({sign}{fmt(profit)})")
              )} → Продано: {fmt(net)} ({sign}{fmt(profit)})")
             await query.edit_message_text(
                 "\n".join(lines)[:4000], reply_markup=kb_game(game), parse_mode="HTML"
