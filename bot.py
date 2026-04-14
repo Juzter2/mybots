@@ -902,14 +902,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gift_id  = int(action)
         conn     = get_db()
         g        = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
-        conn.close()
+              conn.close()
         if not g:
             await query.edit_message_text("❌ Подарунок не знайдено.", reply_markup=kb_gifts())
             return
         floor    = g["floor_ton"] or g["ton"] or 0.0
         ton_rate = get_ton_rate()
         cur_usd  = floor * ton_rate
-            net_usd  = calc_net_gift(cur_usd)
+        net_usd  = calc_net_gift(cur_usd)
         conn = get_db()
         conn.execute(
             "UPDATE gifts SET status='forsale', floor_ton=?, current_usd=?, net_usd=?, updated_at=? WHERE id=?",
@@ -922,7 +922,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Floor: {floor:.1f} TON | {fmt(cur_usd)} | Нетто: {fmt(net_usd)}",
             reply_markup=kb_gifts(), parse_mode="HTML"
         )
-
     elif section == "giftsellcustom":
         gift_id = int(action)
         set_state(uid, "await_gift_sell_ton", gift_id=gift_id,
