@@ -1406,12 +1406,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 val  = c["current_price_usd"] * c["quantity"]
                 pnl  = (c["current_price_usd"] - c["buy_price_usd"]) * c["quantity"]
                 sign = "+" if pnl >= 0 else ""
-                buttons.append(
-(
+                              buttons.append([InlineKeyboardButton(
                     f"🗑 {c['symbol']} x{c['quantity']:.4f} {sign}{fmt(pnl)}",
                     callback_data=f"cryptodel_{c['id']}"
                 )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main_invest")])
+                buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main_invest")])
             await query.edit_message_text(
                 "🗑 Вибери монету для видалення:",
                 reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
