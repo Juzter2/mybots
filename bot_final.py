@@ -2267,10 +2267,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     else:
-        set_state(user_id, None)
-        text, kb = kb_main()
-        await context.bot.send_message(update.effective_chat.id, text, reply_markup=kb)
-
     elif mode == "await_stockdel_qty":
         del_qty = parse_float(user_text)
         if del_qty is None or del_qty <= 0:
