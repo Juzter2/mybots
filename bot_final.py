@@ -1516,83 +1516,101 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]))
 
     # ===== ІНВЕСТИЦІЇ / STOCKACTION / АНАЛІТИКА =====
-    elif section == "stockaction":
-        if action == "add":
-            set_state(user_id, "await_stock_ticker", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            await query.edit_message_text(
-                "📈 Введи тикер або натисни кнопку:",
-                reply_markup=kb_ticker_suggestions("")
+    elif mode == "await_stockdel_qty":
+        del_qty = parse_float(user_text)
+        if del_qty is None or del_qty <= 0:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Введи додатну кількість (напр. 0.1, 1, 2.5):"
             )
-        elif action == "update":
-            await query.edit_message_text("🔄 Оновлюю ціни інвестицій...")
-            results = update_all_stocks()
-            text = "📈 Оновлення:\n" + "\n".join(results) if results else "📈 Немає активних позицій"
-            kb_back = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
-            await query.edit_message_text(text, reply_markup=kb_back)
-        elif action == "delete_list":
-            conn = get_db_conn()
-            stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
-            conn.close()
-            if not stocks:
-                await query.edit_message_text(
-                    "Немає інвестицій.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
-                )
-                return
-            buttons = []
-            for s in stocks:
-                val = (s["current_price_usd"] or s["buy_price_usd"] or 0.0) * (s["quantity"] or 0.0)
-                pnl = ((s["current_price_usd"] or s["buy_price_usd"] or 0.0) - (s["buy_price_usd"] or 0.0)) * (s["quantity"] or 0.0)
-                sign = "+" if pnl >= 0 else ""
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {s['ticker']} ×{s['quantity']:.4f} ({sign}${pnl:.2f})",
-                    callback_data=f"stockdel:{s['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:invest")])
-            await query.edit_message_text("Оберіть позицію для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
+            set_state(
+                user_id,
+                "await_stockdel_qty",
+                stock_id=state.get("stock_id"),
+                ticker=state.get("ticker"),
+                total_qty=state.get("total_qty"),
+                prompt_msg_id=new_prompt.message_id,
+                main_msg_id=main_msg_id,
+            )
+            return
 
-    elif section == "ticker_pick":
-        ticker = action
-        set_state(user_id, "await_stock_qty", ticker=ticker, main_msg_id=query.message.message_id)
-        prompt = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\nВведи кількість (наприклад 1 чи 0,1):"
-        )
-        await query.edit_message_text(
-            f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\n⏳ Введи кількість...",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")]])
-        )
-        set_state(user_id, "await_stock_qty", ticker=ticker,
-                  prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
+        stock_id = state.get("stock_id")
+        ticker = state.get("ticker", "")
+        total_qty = float(state.get("total_qty") or 0.0)
 
-    elif section == "stock_use_cur":
-        parts_s = data.split(":")
-        ticker = parts_s[1]
-        qty = float(parts_s[2])
-        cur_price = float(parts_s[3])
-        buy_price = cur_price
+        if del_qty > total_qty:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Не можна прибрати більше ніж {total_qty:.4f}. Введи менше або дорівнює."
+            )
+            set_state(
+                user_id,
+                "await_stockdel_qty",
+                stock_id=stock_id,
+                ticker=ticker,
+                total_qty=total_qty,
+                prompt_msg_id=new_prompt.message_id,
+                main_msg_id=main_msg_id,
+            )
+            return
+
+        new_qty = total_qty - del_qty
         conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (ticker, ticker, qty, buy_price, cur_price, "active",
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
+        if new_qty <= 0:
+            conn.execute(
+                "UPDATE stocks SET status='removed', quantity=0 WHERE id=?",
+                (stock_id,)
+            )
+        else:
+            conn.execute(
+                "UPDATE stocks SET quantity=? WHERE id=?",
+                (new_qty, stock_id)
+            )
         conn.commit()
         conn.close()
-        set_state(user_id, None)
-        await query.edit_message_text(
-            f"✅ {ticker} × {qty} додано!\n💵 Куплено за поточною: ${cur_price:.2f}\n📊 PnL: $0.00 (щойно куплено)",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
-        )
 
-    elif section == "stockdel":
+        set_state(user_id, None)
+        if new_qty <= 0:
+            msg_text = f"✅ {ticker}: позицію повністю прибрано."
+        else:
+            msg_text = (
+                f"✅ {ticker}: кількість зменшено.\n"
+                f"Було: {total_qty:.4f}\n"
+                f"Прибрано: {del_qty:.4f}\n"
+                f"Залишилось: {new_qty:.4f}"
+            )
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+        return
         stock_id = int(action)
         conn = get_db_conn()
-        conn.execute("UPDATE stocks SET status='removed' WHERE id=?", (stock_id,))
-        conn.commit()
+        s = conn.execute("SELECT * FROM stocks WHERE id=? AND status='active'", (stock_id,)).fetchone()
         conn.close()
+        if not s:
+            await query.edit_message_text(
+                "❌ Позицію не знайдено.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
+            )
+            return
+
+        total_qty = s["quantity"] or 0.0
+        ticker = s["ticker"]
+
+        set_state(
+            user_id,
+            "await_stockdel_qty",
+            stock_id=stock_id,
+            ticker=ticker,
+            total_qty=total_qty,
+            main_msg_id=query.message.message_id,
+        )
+
+        text = (
+            f"🗑 {ticker}\n"
+            f"Поточна кількість: {total_qty:.4f}\n\n"
+            f"Введи, яку кількість прибрати (наприклад 0.1, 1.5):"
+        )
         await query.edit_message_text(
-            "✅ Позицію видалено.",
+            text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
         )
 
