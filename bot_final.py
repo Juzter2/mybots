@@ -1724,39 +1724,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(update.effective_chat.id, msg_text)
         return
         
-        stock_id = int(action)
-        conn = get_db_conn()
-        s = conn.execute("SELECT * FROM stocks WHERE id=? AND status='active'", (stock_id,)).fetchone()
-        conn.close()
-        if not s:
-            await query.edit_message_text(
-                "❌ Позицію не знайдено.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
-            )
-            return
-
-        total_qty = s["quantity"] or 0.0
-        ticker = s["ticker"]
-
-        set_state(
-            user_id,
-            "await_stockdel_qty",
-            stock_id=stock_id,
-            ticker=ticker,
-            total_qty=total_qty,
-            main_msg_id=query.message.message_id,
-        )
-
-        text = (
-            f"🗑 {ticker}\n"
-            f"Поточна кількість: {total_qty:.4f}\n\n"
-            f"Введи, яку кількість прибрати (наприклад 0.1, 1.5):"
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
-        )
-
     # ===== ПОРТФЕЛЬ / АНАЛІТИКА (аналогічно твоєму старому коду) =====
     elif section == "portfolio":
         if action == "balance":
