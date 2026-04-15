@@ -1712,7 +1712,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # ===== STEAM SEARCH =====
-        if mode == "await_steam_search":
+    if mode == "await_steam_search":
         game_title = "CS2/Dota"
         # шукаємо і в CS2, і в Dota2
         cs2_results = await asyncio.to_thread(fetch_steam_market_search, user_text, APPID_CS2)
@@ -1726,6 +1726,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r2 = dict(r)
             r2["game"] = "dota2"
             results.append(r2)
+
         if not results:
             msg_text = f"❌ Нічого не знайдено за запитом '{user_text}'."
             if main_msg_id:
@@ -1742,12 +1743,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_skins_menu())
             set_state(user_id, None)
             return
-        set_state(user_id, "await_steam_search_result", game=game, search_results=results, main_msg_id=main_msg_id)
+
+        set_state(user_id, "await_steam_search_result", game="cs2", search_results=results, main_msg_id=main_msg_id)
         buttons = []
         for idx, r in enumerate(results):
             buttons.append([InlineKeyboardButton(
                 f"{r['name']} (${r['price_usd']:.2f})",
-                callback_data=f"steamresult:{idx}:{game}"
+                callback_data=f"steamresult:{idx}:mixed"
             )])
         buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="main:skins")])
         msg_text = f"🔍 Результати пошуку '{user_text}' [{game_title}]:"
@@ -1763,7 +1765,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=InlineKeyboardMarkup(buttons))
         else:
             await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=InlineKeyboardMarkup(buttons))
-
     # ===== GIFT INPUT =====
     elif mode == "await_gift_name_new":
         name = user_text
