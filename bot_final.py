@@ -1199,7 +1199,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # ===== РЕЗУЛЬТАТ ВИБОРУ СКІНА (STEAMRESULT) =====
     elif section == "steamresult":
         idx = int(action)
-        game = param or "cs2"
         state = get_state(user_id)
         results = (state or {}).get("search_results", [])
         if idx < 0 or idx >= len(results):
@@ -1208,6 +1207,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         item = results[idx]
+        game = item.get("game", "cs2")
         name = item["name"]
         cur_price = item["price_usd"]
         qty = 1
@@ -1712,11 +1712,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # ===== STEAM SEARCH =====
-    if mode == "await_steam_search":
-        game = state.get("game", "cs2")
-        appid = APPID_CS2 if game == "cs2" else APPID_DOTA2
+        if mode == "await_steam_search":
         game_title = "CS2/Dota"
-        results = await asyncio.to_thread(fetch_steam_market_search, user_text, appid)
+        # шукаємо і в CS2, і в Dota2
+        cs2_results = await asyncio.to_thread(fetch_steam_market_search, user_text, APPID_CS2)
+        dota_results = await asyncio.to_thread(fetch_steam_market_search, user_text, APPID_DOTA2)
+        results = []
+        for r in cs2_results:
+            r2 = dict(r)
+            r2["game"] = "cs2"
+            results.append(r2)
+        for r in dota_results:
+            r2 = dict(r)
+            r2["game"] = "dota2"
+            results.append(r2)
         if not results:
             msg_text = f"❌ Нічого не знайдено за запитом '{user_text}'."
             if main_msg_id:
