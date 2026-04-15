@@ -2625,7 +2625,6 @@ async def job_morning_digest(context: ContextTypes.DEFAULT_TYPE):
             f"🎮 Steam: {cs2_count + dota_count} активів ({format_usd_uah(steam_total)})\n"
             f"🎁 Подарунки: {gifts_count} ({format_usd_uah(gifts_total)})"
             f"{stocks_str}\n"
-            f"💵 Кеш: {format_usd_uah(cash)}"
         )
         recs = []
         conn2 = get_db_conn()
