@@ -1,3 +1,4 @@
+import logging
 import json
 import os
 import io
@@ -16,20 +17,19 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from telegram import (
-Update,
-InlineKeyboardButton,
-InlineKeyboardMarkup,
-InputFile,
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
 )
 from telegram.ext import (
-ApplicationBuilder,
-CommandHandler,
-CallbackQueryHandler,
-MessageHandler,
-ContextTypes,
-filters,
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
-
 # ============== КОНФІГ ==============
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8731260970:AAFOPneNNiSpnCWPByDHe8C7P67zbFsrSQ")
