@@ -1084,11 +1084,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=query.message.chat_id,
                 text="🔍 Введи частину назви предмета (CS2/Dota):"
             )
-            set_state(user_id, "await_steam_search", game="cs2",
-                      prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
+            set_state(
+                user_id,
+                "await_steam_search",
+                game="cs2",
+                prompt_msg_id=prompt.message_id,
+                main_msg_id=query.message.message_id,
+            )
             await query.edit_message_text(
                 "⏳ Чекаю назву предмета для пошуку...",
-                reply_markup=kb_skins_menu()
+                reply_markup=kb_skins_menu(),
             )
 
         elif action == "sell":
@@ -1104,14 +1109,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for it in items:
                 p = it["current_price_usd"] or 0.0
                 q = it["quantity"] or 1
-                buttons.append([InlineKeyboardButton(
-                    f"{it['name']} ×{q} (${p:.2f})",
-                    callback_data=f"sellitem:{it['id']}:skins"
-                )])
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{it['name']} ×{q} (${p:.2f})",
+                        callback_data=f"sellitem:{it['id']}:skins",
+                    )
+                ])
             buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:skins")])
             await query.edit_message_text(
                 "✅ Вибери скін для продажу:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
 
         elif action == "delete":
@@ -1125,14 +1132,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             buttons = []
             for it in items:
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {it['name']}",
-                    callback_data=f"delitem:{it['id']}:skins"
-                )])
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"🗑 {it['name']}",
+                        callback_data=f"delitem:{it['id']}:skins",
+                    )
+                ])
             buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:skins")])
             await query.edit_message_text(
                 "🗑 Вибери скін для видалення:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
 
         elif action == "history":
@@ -1177,7 +1186,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 net = calc_net(price)
                 conn.execute(
                     "UPDATE steam_items SET current_price_usd=?, net_price_usd=? WHERE id=?",
-                    (price, net, it["id"])
+                    (price, net, it["id"]),
                 )
                 updated += 1
             conn.commit()
@@ -1187,6 +1196,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if alerts_fired:
                 text += "\n\n" + "\n".join(alerts_fired)
             await query.edit_message_text(text, reply_markup=kb_skins_menu())
+                # ===== РЕЗУЛЬТАТ ВИБОРУ СКІНА (STEAMRESULT) =====
+    elif section == "steamresult":
+        idx = int(action)
+        game = param or "cs2"
+        state = get_state(user_id)
+        results = (state or {}).get("search_results", [])
+        if idx < 0 or idx >= len(results):
+            await query.edit_message_text("❌ Невірний вибір.", reply_markup=kb_skins_menu())
+            set_state(user_id, None)
+            return
+
+        item = results[idx]
+        name = item["name"]
+        cur_price = item["price_usd"]
+        qty = 1
+
+        set_state(
+            user_id,
+            "await_steam_buyprice",
+            game=game,
+            name=name,
+            qty=qty,
+            cur_price=cur_price,
+            main_msg_id=query.message.message_id,
+        )
+
+        text = (
+            f"🎮 {name}\n"
+            f"Поточна ціна: {format_usd_uah(cur_price)}\n\n"
+            f"💵 За скільки ти КУПИВ за 1 шт (USD)?"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Скасувати", callback_data="main:skins")]
+            ]),
+        )
                 # ===== SELLITEM =====
     elif section == "sellitem":
         item_id = int(action)
