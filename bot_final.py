@@ -2507,53 +2507,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_text = f"✅ Ціль додано!\n{asset_name}: {cond_str} {format_usd_uah(target_price)}"
         await context.bot.send_message(update.effective_chat.id, msg_text)
 
-    # ===== STEAM BUY PRICE =====
-       elif mode == "await_steam_buyprice":
-        buy_price = parse_float(user_text)
-        if buy_price is None:
-            buy_price = 0.0  # якщо порожньо/'-' → 0
-
-        game = state.get("game", "cs2")
-        name = state.get("name", "")
-        qty = state.get("qty", 1)
-        cur_price = state.get("cur_price", buy_price)
-        net_price = calc_net(cur_price)
-
-        conn = get_db_conn()
-        conn.execute(
-            """
-            INSERT INTO steam_items (
-                game, name, quantity, buy_price_usd,
-                current_price_usd, net_price_usd, added_date, status
-            ) VALUES (?,?,?,?,?,?,?,?)
-            """,
-            (
-                game,
-                name,
-                qty,
-                buy_price,
-                cur_price,
-                net_price,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "active",
-            )
-        )
-        conn.commit()
-        conn.close()
-
-        set_state(user_id, None)
-        pnl = (cur_price - buy_price) * qty
-        sign = "+" if pnl >= 0 else ""
-        msg_text = (
-            f"✅ {name} × {qty} додано!\n"
-            f"💵 Куплено: ${buy_price:.2f} × {qty}\n"
-            f"📊 Зараз: ${cur_price:.2f} → PnL: {sign}${pnl:.2f}"
-        )
-        await context.bot.send_message(update.effective_chat.id, msg_text)
-    else:
-        set_state(user_id, None)
-        text, kb = kb_main()
-        await context.bot.send_message(update.effective_chat.id, text, reply_markup=kb)
 
 # ============== JOB FUNCTIONS ==============
 
