@@ -555,7 +555,7 @@ def kb_ticker_suggestions(query: str = "") -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="invest:menu")])
+    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:invest")])
     return InlineKeyboardMarkup(buttons)
 
 def calc_current_portfolio_value_db() -> float:
