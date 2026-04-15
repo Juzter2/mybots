@@ -2067,12 +2067,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             hint = (
-                f"🔍 {query_text}"
+                f"🔍 {query_text} — обери або введи повний тикер:"
                 if matches
                 else f"❓ {query_text} — не знайдено, але можна ввести вручну"
             )
-            if matches:
-                hint += " — обери або введи повний тикер:"
             set_state(
                 user_id,
                 "await_stock_ticker",
@@ -2125,7 +2123,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         kb_cur = InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                f"✅ За поточною (${cur_price:.2f})" if cur_price else "✅ За поточною (0 → купив за 0)",
+                f"✅ За поточною (${cur_price:.2f})" if cur_price else "✅ За поточною (купив за $0)",
                 callback_data=f"stock_use_cur:{ticker}:{qty}:{cur_price or 0}"
             )],
             [InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")],
@@ -2143,7 +2141,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=(
                 f"📈 {ticker} × {qty}\n"
                 f"{price_hint}"
-                f"💵 За скільки купив? Якщо залишиш порожньо або '-', буде 0."
+                f"💵 За скільки купив? Якщо залишиш порожньо або '-', буде $0."
             ),
             reply_markup=kb_cur,
         )
@@ -2160,7 +2158,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif mode == "await_stock_price":
         buy_price = parse_float(user_text)
         if buy_price is None:
-            buy_price = 0.0  # якщо порожньо/'-' → 0
+            buy_price = 0.0
 
         ticker = state.get("ticker", "")
         qty = state.get("qty", 1)
@@ -2168,12 +2166,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db_conn()
         conn.execute(
-            """
-            INSERT INTO stocks (
-                ticker, name, quantity, buy_price_usd, current_price_usd,
-                status, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?)
-            """,
+            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (
                 ticker,
                 ticker,
@@ -2198,6 +2192,117 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await context.bot.send_message(update.effective_chat.id, msg_text)
         return
+
+    elif mode == "await_steam_buy_price":
+        buy_price = parse_float(user_text)
+        if buy_price is None:
+            buy_price = 0.0
+
+        game = state.get("game", "cs2")
+        name = state.get("name", "")
+        qty = state.get("qty", 1)
+        cur_price = state.get("cur_price", buy_price)
+        net_price = calc_net(cur_price)
+
+        conn = get_db_conn()
+        conn.execute(
+            "INSERT INTO steam_items (game, name, quantity, buy_price_usd, current_price_usd, net_price_usd, added_date, status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                game,
+                name,
+                qty,
+                buy_price,
+                cur_price,
+                net_price,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "active",
+            )
+        )
+        conn.commit()
+        conn.close()
+
+        set_state(user_id, None)
+        pnl = (cur_price - buy_price) * qty
+        sign = "+" if pnl >= 0 else ""
+        msg_text = (
+            f"✅ {name} × {qty} додано!\n"
+            f"💵 Куплено: ${buy_price:.2f} × {qty}\n"
+            f"📊 Зараз: ${cur_price:.2f} → PnL: {sign}${pnl:.2f}"
+        )
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+        return
+
+    elif mode == "await_stockdel_qty":
+        del_qty = parse_float(user_text)
+        if del_qty is None or del_qty <= 0:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Введи додатну кількість (напр. 0.1, 1, 2.5):"
+            )
+            set_state(
+                user_id,
+                "await_stockdel_qty",
+                stock_id=state.get("stock_id"),
+                ticker=state.get("ticker"),
+                total_qty=state.get("total_qty"),
+                prompt_msg_id=new_prompt.message_id,
+                main_msg_id=main_msg_id,
+            )
+            return
+
+        stock_id = state.get("stock_id")
+        ticker = state.get("ticker", "")
+        total_qty = float(state.get("total_qty") or 0.0)
+
+        if del_qty > total_qty:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Не можна прибрати більше ніж {total_qty:.4f}. Введи менше або дорівнює."
+            )
+            set_state(
+                user_id,
+                "await_stockdel_qty",
+                stock_id=stock_id,
+                ticker=ticker,
+                total_qty=total_qty,
+                prompt_msg_id=new_prompt.message_id,
+                main_msg_id=main_msg_id,
+            )
+            return
+
+        new_qty = total_qty - del_qty
+        conn = get_db_conn()
+        if new_qty <= 0:
+            conn.execute(
+                "UPDATE stocks SET status='removed', quantity=0 WHERE id=?",
+                (stock_id,)
+            )
+        else:
+            conn.execute(
+                "UPDATE stocks SET quantity=? WHERE id=?",
+                (new_qty, stock_id)
+            )
+        conn.commit()
+        conn.close()
+
+        set_state(user_id, None)
+        if new_qty <= 0:
+            msg_text = f"✅ {ticker}: позицію повністю прибрано."
+        else:
+            msg_text = (
+                f"✅ {ticker}: кількість зменшено.\n"
+                f"Було: {total_qty:.4f}\n"
+                f"Прибрано: {del_qty:.4f}\n"
+                f"Залишилось: {new_qty:.4f}"
+            )
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+        return
+
+    else:
+        set_state(user_id, None)
+        text, kb = kb_main()
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=kb)
 
     elif mode == "await_stockdel_qty":
         del_qty = parse_float(user_text)
