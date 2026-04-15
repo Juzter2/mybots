@@ -73,8 +73,8 @@ def cache_get(key: str):
 def cache_set(key: str, val):
     _cache[key] = (val, time_module.time())
 
-
 # ============== БАЗА ДАНИХ ==============
+
 def get_db_conn():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -205,29 +205,33 @@ def init_db():
       updated_at TEXT
     );
     """)
-    conn.commit()
-    conn.close()
 
-    # Міграції
+    # ---- МІГРАЦІЇ ДЛЯ СТАРИХ БД ----
+
+    # steam_items: quantity
     existing_steam = [row[1] for row in conn.execute("PRAGMA table_info(steam_items)").fetchall()]
     if "quantity" not in existing_steam:
         conn.execute("ALTER TABLE steam_items ADD COLUMN quantity INTEGER DEFAULT 1")
-    conn.commit()
 
+    # gifts: fragment_slug, floor_ton
     existing_gifts = [row[1] for row in conn.execute("PRAGMA table_info(gifts)").fetchall()]
     if "fragment_slug" not in existing_gifts:
         conn.execute("ALTER TABLE gifts ADD COLUMN fragment_slug TEXT")
     if "floor_ton" not in existing_gifts:
         conn.execute("ALTER TABLE gifts ADD COLUMN floor_ton REAL")
-    conn.commit()
 
+    # balance: monthly_budget_uah
     existing_balance = [row[1] for row in conn.execute("PRAGMA table_info(balance)").fetchall()]
     if "monthly_budget_uah" not in existing_balance:
         try:
             conn.execute("ALTER TABLE balance ADD COLUMN monthly_budget_uah REAL")
-            conn.commit()
         except Exception:
             pass
+
+    # stocks: items_count (якщо стара база)
+    existing_stocks = [row[1] for row in conn.execute("PRAGMA table_info(stocks)").fetchall()]
+    if "items_count" not in existing_stocks:
+        conn.execute("ALTER TABLE stocks ADD COLUMN items_count REAL DEFAULT 1")
 
     conn.commit()
     conn.close()
