@@ -1,4 +1,3 @@
-import logging
 import json
 import os
 import io
@@ -17,18 +16,18 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile,
+Update,
+InlineKeyboardButton,
+InlineKeyboardMarkup,
+InputFile,
 )
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+ApplicationBuilder,
+CommandHandler,
+CallbackQueryHandler,
+MessageHandler,
+ContextTypes,
+filters,
 )
 
 # ============== КОНФІГ ==============
@@ -44,7 +43,6 @@ GIFTS_FEE = 0.05
 
 APPID_CS2 = 730
 APPID_DOTA2 = 570
-
 INVEST_INPUT_IS_UAH = True
 UAH_BUDGET_DEFAULT = 5000.0
 HISTORY_DAYS_TO_KEEP = 60
@@ -208,8 +206,7 @@ def init_db():
     """)
     conn.commit()
 
-    # Міграції: додаємо нові колонки якщо не існують
-    # Міграція steam_items: quantity
+    # Міграції
     existing_steam = [row[1] for row in conn.execute("PRAGMA table_info(steam_items)").fetchall()]
     if "quantity" not in existing_steam:
         conn.execute("ALTER TABLE steam_items ADD COLUMN quantity INTEGER DEFAULT 1")
@@ -262,7 +259,7 @@ def add_transaction(type_: str, item_name: str, amount_usd: float, amount_uah: f
     conn.commit()
     conn.close()
 
-# ============== STEAM API ==============
+# ============== STEAM / STOCK / RATES API ==============
 
 def fetch_steam_price_usd(appid: int, market_name: str):
     cache_key = f"steam_{appid}_{market_name}"
@@ -299,7 +296,6 @@ def fetch_steam_price_usd(appid: int, market_name: str):
     return value
 
 def fetch_steam_market_search(query: str, appid: int):
-    """Шукає предмети на Steam Market і повертає список (name, price_usd)."""
     import urllib.parse
     encoded = urllib.parse.quote(query)
     url = (
@@ -309,7 +305,7 @@ def fetch_steam_market_search(query: str, appid: int):
     )
     try:
         resp = requests.get(url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         })
         if resp.status_code != 200:
             return []
@@ -327,7 +323,6 @@ def fetch_steam_market_search(query: str, appid: int):
         return []
 
 def fetch_stock_price(ticker: str):
-    """Отримує поточну ціну акції з Yahoo Finance."""
     cache_key = f"stock_{ticker}"
     cached = cache_get(cache_key)
     if cached is not None:
@@ -349,7 +344,6 @@ def fetch_stock_price(ticker: str):
         return None
 
 def update_all_stocks():
-    """Оновлює поточні ціни всіх активних акцій."""
     conn = get_db_conn()
     stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
     conn.close()
@@ -398,7 +392,6 @@ def get_usd_to_uah_rate():
     if r is None or r == 0:
         return None
     return 1.0 / r
-
 def uah_to_usd(amount_uah: float):
     rate = get_uah_to_usd_rate()
     if rate is None:
@@ -417,7 +410,7 @@ def format_usd_uah(usd: float) -> str:
         return f"${usd:.2f} (~{uah:.0f} грн)"
     return f"${usd:.2f}"
 
-# ============== КУРС TON / USD (CoinGecko) ==============
+# ============== TON (CoinGecko) ==============
 
 def get_ton_to_usd_rate():
     cached = cache_get("ton_usd_rate")
@@ -474,7 +467,6 @@ def fetch_fragment_floor_price_ton(collection_slug: str):
     return None
 
 def fetch_fragment_nft_price_ton(slug: str):
-    """Отримує ціну конкретного NFT з fragment.com/gift/{slug}."""
     cached = cache_get(f"fragment_nft_{slug}")
     if cached is not None:
         return cached
@@ -484,7 +476,6 @@ def fetch_fragment_nft_price_ton(slug: str):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
         })
         text = r.text
-        # Шукаємо ціну конкретного NFT
         matches = re.findall(r'tm-item-main-value[^>]*>([\d,\.]+)<', text)
         if not matches:
             matches = re.findall(r'"price"[^>]*>([\d,\.]+)\s*TON', text)
@@ -510,7 +501,6 @@ def calc_gift_net(price_usd: float) -> float:
     return price_usd * (1 - GIFTS_FEE)
 
 def parse_float(text: str) -> float | None:
-    """Парсить float: 0,09421 / 0.09421 / $12.5 / 1 234.56"""
     t = text.strip().replace("$", "").replace(" ", "").replace("\u00a0", "")
     if not t or t == "-":
         return None
@@ -565,7 +555,7 @@ def kb_ticker_suggestions(query: str = "") -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")])
+    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="invest:menu")])
     return InlineKeyboardMarkup(buttons)
 
 def calc_current_portfolio_value_db() -> float:
@@ -574,7 +564,6 @@ def calc_current_portfolio_value_db() -> float:
     steam_net = sum((r["net_price_usd"] or 0.0) for r in steam_rows)
     gift_rows = conn.execute("SELECT net_usd FROM gifts WHERE status IN ('active','for_sale')").fetchall()
     gifts_net = sum((r["net_usd"] or 0.0) for r in gift_rows)
-    # Акції: включаємо поточну вартість (поточна ціна або ціна покупки)
     stock_rows = conn.execute(
         "SELECT quantity, current_price_usd, buy_price_usd FROM stocks WHERE status='active'"
     ).fetchall()
@@ -586,7 +575,10 @@ def calc_current_portfolio_value_db() -> float:
 def get_steam_net_total(game=None) -> float:
     conn = get_db_conn()
     if game:
-        rows = conn.execute("SELECT net_price_usd FROM steam_items WHERE status='active' AND game=?", (game,)).fetchall()
+        rows = conn.execute(
+            "SELECT net_price_usd FROM steam_items WHERE status='active' AND game=?",
+            (game,)
+        ).fetchall()
     else:
         rows = conn.execute("SELECT net_price_usd FROM steam_items WHERE status='active'").fetchall()
     conn.close()
@@ -645,7 +637,8 @@ def record_snapshot():
     today = datetime.utcnow().strftime("%Y-%m-%d")
     conn = get_db_conn()
     conn.execute(
-        "INSERT INTO portfolio_history(date,portfolio_usd) VALUES(?,?) ON CONFLICT(date) DO UPDATE SET portfolio_usd=excluded.portfolio_usd",
+        "INSERT INTO portfolio_history(date,portfolio_usd) VALUES(?,?) "
+        "ON CONFLICT(date) DO UPDATE SET portfolio_usd=excluded.portfolio_usd",
         (today, val)
     )
     conn.commit()
@@ -653,7 +646,6 @@ def record_snapshot():
     return val
 
 def check_price_targets():
-    """Перевіряє price_targets і повертає список сповіщень."""
     alerts_fired = []
     conn = get_db_conn()
     targets = conn.execute("SELECT * FROM price_targets WHERE is_active=1").fetchall()
@@ -687,7 +679,6 @@ def check_price_targets():
     return alerts_fired
 
 def check_alerts_db():
-    """Перевіряє старі alerts і повертає список сповіщень."""
     alerts_fired = []
     conn = get_db_conn()
     active_alerts = conn.execute("SELECT * FROM alerts WHERE is_active=1").fetchall()
@@ -728,7 +719,7 @@ def check_alerts_db():
             )
     return alerts_fired
 
-# ============== СТАНИ КОРИСТУВАЧІВ ==============
+# ============== СТАНИ ==============
 
 user_states: dict = {}
 
@@ -741,7 +732,7 @@ def set_state(user_id: int, mode=None, **kwargs):
 def get_state(user_id: int):
     return user_states.get(user_id)
 
-# ============== INLINE КЛАВІАТУРИ ==============
+# ============== INLINE КЛАВІАТУРИ (НОВЕ МЕНЮ) ==============
 
 def kb_main():
     portfolio_val = calc_current_portfolio_value_db()
@@ -757,49 +748,32 @@ def kb_main():
     )
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🎮 Активи", callback_data="main:assets"),
+            InlineKeyboardButton("🎮 Скіни", callback_data="main:skins"),
             InlineKeyboardButton("🎁 Подарунки", callback_data="main:gifts"),
         ],
         [
+            InlineKeyboardButton("📈 Інвестиції", callback_data="main:invest"),
             InlineKeyboardButton("💼 Портфель", callback_data="main:portfolio"),
-            InlineKeyboardButton("💰 Фінанси", callback_data="main:finance"),
         ],
         [
             InlineKeyboardButton("📊 Аналітика", callback_data="main:analytics"),
-            InlineKeyboardButton("⚙️ Інше", callback_data="main:other"),
-        ],
-        [
-            InlineKeyboardButton("📈 Акції", callback_data="assets:stocks"),
         ],
     ])
     return text, kb
 
-def kb_assets():
+def kb_skins_menu():
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Інвентар", callback_data="skins:inventory")],
         [
-            InlineKeyboardButton("🔫 CS2", callback_data="assets:cs2"),
-            InlineKeyboardButton("🛡 Dota 2", callback_data="assets:dota2"),
-        ],
-        [InlineKeyboardButton("📦 Всі інвентарі", callback_data="assets:all")],
-        [InlineKeyboardButton("🔄 Оновити ціни", callback_data="assets:update")],
-        [InlineKeyboardButton("🏠 Назад", callback_data="main:home")],
-    ])
-    return kb
-
-def kb_game(game: str):
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("➕ Додати", callback_data=f"game:add:{game}"),
-            InlineKeyboardButton("✅ Продати", callback_data=f"game:sell:{game}"),
+            InlineKeyboardButton("➕ Додати", callback_data="skins:add"),
+            InlineKeyboardButton("💸 Продати", callback_data="skins:sell"),
         ],
         [
-            InlineKeyboardButton("🗑 Видалити", callback_data=f"game:delete:{game}"),
-            InlineKeyboardButton("📋 Продані", callback_data=f"game:sold:{game}"),
+            InlineKeyboardButton("📋 Історія", callback_data="skins:history"),
+            InlineKeyboardButton("🗑 Видалити", callback_data="skins:delete"),
         ],
-        [
-            InlineKeyboardButton("🏆 Топ дорогих", callback_data=f"game:top:{game}"),
-            InlineKeyboardButton("◀️ Назад", callback_data="main:assets"),
-        ],
+        [InlineKeyboardButton("🔄 Оновити", callback_data="skins:update")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
     ])
     return kb
 
@@ -811,10 +785,9 @@ def kb_gifts():
         ],
         [
             InlineKeyboardButton("➕ Додати", callback_data="gifts:add"),
-            InlineKeyboardButton("🔍 Відстежити NFT", callback_data="gifts:tracknft"),
         ],
         [InlineKeyboardButton("🔄 Оновити ціни", callback_data="gifts:update")],
-        [InlineKeyboardButton("🏠 Назад", callback_data="main:home")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
     ])
     return kb
 
@@ -829,40 +802,7 @@ def kb_portfolio():
             InlineKeyboardButton("💰 PnL", callback_data="portfolio:pnl"),
         ],
         [InlineKeyboardButton("📸 Snapshot", callback_data="portfolio:snapshot")],
-        [InlineKeyboardButton("🏠 Назад", callback_data="main:home")],
-    ])
-    return kb
-
-def kb_finance():
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💵 Вільні кошти", callback_data="finance:free"),
-            InlineKeyboardButton("📥 Поповнення", callback_data="finance:topup"),
-        ],
-        [InlineKeyboardButton("💸 Витрати", callback_data="finance:expense")],
-        [InlineKeyboardButton("📊 Історія", callback_data="finance:history")],
-        [
-            InlineKeyboardButton("🔁 Регулярні", callback_data="finance:recurring"),
-            InlineKeyboardButton("🏠 Назад", callback_data="main:home"),
-        ],
-    ])
-    return kb
-
-def kb_expense_categories():
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🍕 Їжа", callback_data="expense:cat:food"),
-            InlineKeyboardButton("🎮 Ігри", callback_data="expense:cat:games"),
-        ],
-        [
-            InlineKeyboardButton("🚗 Транспорт", callback_data="expense:cat:transport"),
-            InlineKeyboardButton("👕 Одяг", callback_data="expense:cat:clothes"),
-        ],
-        [
-            InlineKeyboardButton("💊 Здоров'я", callback_data="expense:cat:health"),
-            InlineKeyboardButton("📦 Інше", callback_data="expense:cat:other"),
-        ],
-        [InlineKeyboardButton("◀️ Назад", callback_data="main:finance")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
     ])
     return kb
 
@@ -877,49 +817,10 @@ def kb_analytics():
             InlineKeyboardButton("🤖 Рекомендації", callback_data="analytics:recommend"),
         ],
         [InlineKeyboardButton("📅 Тиждень vs тиждень", callback_data="analytics:weekvweek")],
-        [InlineKeyboardButton("🏠 Назад", callback_data="main:home")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
     ])
     return kb
-
-def kb_other():
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔔 Сповіщення", callback_data="other:alerts"),
-            InlineKeyboardButton("📋 Цільові ціни", callback_data="other:targets"),
-        ],
-        [
-            InlineKeyboardButton("🔁 Регулярні", callback_data="other:recurring"),
-            InlineKeyboardButton("🧹 Очистити", callback_data="other:clean"),
-        ],
-        [InlineKeyboardButton("🏠 Назад", callback_data="main:home")],
-    ])
-    return kb
-
-def kb_recurring():
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Додати", callback_data="recurring:add")],
-        [InlineKeyboardButton("📋 Список", callback_data="recurring:list")],
-        [InlineKeyboardButton("🗑 Видалити", callback_data="recurring:delete_list")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="main:finance")],
-    ])
-    return kb
-
-def kb_back_main():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Назад", callback_data="main:home")]])
-
-def kb_back_assets():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:assets")]])
-
-def kb_back_gifts():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:gifts")]])
-
-def kb_back_portfolio():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:portfolio")]])
-
-def kb_back_finance():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:finance")]])
-
-# ============== GUARD ==============
+   # ============== GUARD ==============
 
 async def guard_callback(query) -> bool:
     if query.from_user.id != ALLOWED_USER:
@@ -963,7 +864,6 @@ def make_pie_chart_bytes() -> bytes:
     dota = get_steam_net_total("dota2")
     gifts = get_gifts_net_total()
     cash = get_balance("free_balance_usd")
-    # Акції: рахуємо загальну поточну вартість акцій з БД
     conn_s = get_db_conn()
     stock_rows = conn_s.execute(
         "SELECT quantity, current_price_usd, buy_price_usd FROM stocks WHERE status='active'"
@@ -984,7 +884,7 @@ def make_pie_chart_bytes() -> bytes:
         sizes.append(gifts)
         colors.append("#2196F3")
     if stocks_val > 0:
-        labels.append(f"Акції ${stocks_val:.1f}")
+        labels.append(f"Інвестиції ${stocks_val:.1f}")
         sizes.append(stocks_val)
         colors.append("#FF9800")
     if cash > 0:
@@ -1011,7 +911,6 @@ def make_pnl_chart_bytes() -> bytes:
     for d in periods:
         p, _ = get_pnl_for_period(d)
         pnls.append(p if p is not None else 0.0)
-    # All time
     total_invest = get_balance("total_invest_usd")
     current = calc_current_portfolio_value_db()
     all_time = current - total_invest
@@ -1021,7 +920,7 @@ def make_pnl_chart_bytes() -> bytes:
     bar_colors = ["#4CAF50" if v >= 0 else "#F44336" for v in pnls]
     bars = ax.bar(labels, pnls, color=bar_colors)
     ax.axhline(y=0, color="black", linewidth=0.8, linestyle="--")
-    ax.set_title("PnL за periodами")
+    ax.set_title("PnL за періодами")
     ax.set_ylabel("USD")
     for bar, val in zip(bars, pnls):
         sign = "+" if val >= 0 else ""
@@ -1065,127 +964,194 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, kb = kb_main()
             await query.edit_message_text(text, reply_markup=kb)
 
-        elif action == "assets":
-            cs2_total = get_steam_net_total("cs2")
-            dota_total = get_steam_net_total("dota2")
-            text = (
-                f"🎮 Активи\n"
-                f"🔫 CS2: {format_usd_uah(cs2_total)}\n"
-                f"🛡 Dota 2: {format_usd_uah(dota_total)}\n"
-                f"Разом: {format_usd_uah(cs2_total + dota_total)}"
-            )
-            await query.edit_message_text(text, reply_markup=kb_assets())
+        elif action == "skins":
+            conn = get_db_conn()
+            items = conn.execute(
+                "SELECT * FROM steam_items WHERE status='active' ORDER BY current_price_usd DESC"
+            ).fetchall()
+            conn.close()
+            total_net = sum((it["net_price_usd"] or 0.0) for it in items)
+            count_items = len(items)
+
+            conn = get_db_conn()
+            cs2_total = conn.execute(
+                "SELECT COALESCE(SUM(net_price_usd),0) FROM steam_items WHERE status='active' AND game='cs2'"
+            ).fetchone()[0]
+            dota_total = conn.execute(
+                "SELECT COALESCE(SUM(net_price_usd),0) FROM steam_items WHERE status='active' AND game='dota2'"
+            ).fetchone()[0]
+            conn.close()
+
+            lines = [
+                "🎮 Скіни",
+                f"💰 Загальна вартість: {format_usd_uah(total_net)}",
+                f"📦 Кількість предметів: {count_items}",
+            ]
+            if cs2_total or dota_total:
+                lines.append("")
+                if cs2_total:
+                    lines.append(f"🔫 CS2: {format_usd_uah(cs2_total)}")
+                if dota_total:
+                    lines.append(f"🛡 Dota 2: {format_usd_uah(dota_total)}")
+            text = "\n".join(lines)
+            await query.edit_message_text(text, reply_markup=kb_skins_menu())
 
         elif action == "gifts":
             conn = get_db_conn()
             gifts_count = conn.execute("SELECT COUNT(*) FROM gifts WHERE status IN ('active','for_sale')").fetchone()[0]
-            nft_count = conn.execute("SELECT COUNT(*) FROM nft_tracked WHERE status='tracking'").fetchone()[0]
             conn.close()
             gifts_total = get_gifts_net_total()
             text = (
                 f"🎁 Подарунки\n"
                 f"Активних: {gifts_count}\n"
-                f"NFT відстежується: {nft_count}\n"
                 f"Вартість: {format_usd_uah(gifts_total)}"
             )
             await query.edit_message_text(text, reply_markup=kb_gifts())
+
+        elif action == "invest":
+            conn = get_db_conn()
+            stocks = conn.execute("SELECT * FROM stocks WHERE status='active' ORDER BY current_price_usd*quantity DESC").fetchall()
+            conn.close()
+            if not stocks:
+                text = "📈 Інвестиції\n\nПортфель порожній."
+            else:
+                total_val = sum((s["current_price_usd"] or s["buy_price_usd"] or 0.0) * (s["quantity"] or 0.0) for s in stocks)
+                total_buy = sum((s["buy_price_usd"] or 0.0) * (s["quantity"] or 0.0) for s in stocks)
+                total_pnl = total_val - total_buy
+                sign_total = "+" if total_pnl >= 0 else ""
+                lines = [
+                    "📈 Інвестиції",
+                    f"💰 Вартість: ${total_val:,.2f}",
+                    f"📥 Вкладено: ${total_buy:,.2f}",
+                    f"📊 PnL: {sign_total}${total_pnl:,.2f}",
+                    "",
+                ]
+                for s in stocks:
+                    val = (s["current_price_usd"] or s["buy_price_usd"] or 0.0) * (s["quantity"] or 0.0)
+                    pnl = ((s["current_price_usd"] or s["buy_price_usd"] or 0.0) - (s["buy_price_usd"] or 0.0)) * (s["quantity"] or 0.0)
+                    pct = (pnl / ((s["buy_price_usd"] or 0.0) * (s["quantity"] or 1)) * 100) if s["buy_price_usd"] else 0
+                    sign = "+" if pnl >= 0 else ""
+                    emoji = "🟢" if pnl >= 0 else "🔴"
+                    lines.append(f"{emoji} {s['ticker']} × {s['quantity']:.4f}")
+                    lines.append(f"   ${s['current_price_usd'] or s['buy_price_usd']:.2f} = ${val:,.2f}  {sign}{pct:.1f}%")
+                text = "\n".join(lines)
+            kb_invest = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Додати інвестицію", callback_data="stockaction:add")],
+                [InlineKeyboardButton("🔄 Оновити ціни", callback_data="stockaction:update")],
+                [InlineKeyboardButton("🗑 Видалити позицію", callback_data="stockaction:delete_list")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
+            ])
+            await query.edit_message_text(text, reply_markup=kb_invest)
 
         elif action == "portfolio":
             text = "💼 Портфель — обери дію:"
             await query.edit_message_text(text, reply_markup=kb_portfolio())
 
-        elif action == "finance":
-            bal = get_balance("free_balance_usd")
-            budget = get_balance("monthly_budget_uah") or UAH_BUDGET_DEFAULT
-            spent = get_monthly_expenses_uah()
-            text = (
-                f"💰 Фінанси\n"
-                f"💵 Вільний баланс: {format_usd_uah(bal)}\n"
-                f"📊 Бюджет місяця: {budget:.0f} грн (залишок: {max(0, budget - spent):.0f} грн)"
-            )
-            await query.edit_message_text(text, reply_markup=kb_finance())
-
         elif action == "analytics":
             text = "📊 Аналітика — обери дію:"
             await query.edit_message_text(text, reply_markup=kb_analytics())
 
-        elif action == "other":
-            text = "⚙️ Інше — обери дію:"
-            await query.edit_message_text(text, reply_markup=kb_other())
-
-    # ===== ASSETS =====
-    elif section == "assets":
-        if action == "cs2":
+    # ===== СКІНИ =====
+    elif section == "skins":
+        if action == "inventory":
             conn = get_db_conn()
             items = conn.execute(
-                "SELECT * FROM steam_items WHERE game='cs2' AND status='active' ORDER BY current_price_usd DESC"
+                "SELECT * FROM steam_items WHERE status='active' ORDER BY current_price_usd DESC"
             ).fetchall()
             conn.close()
-            if items:
-                lines = ["🔫 CS2 — активні скіни:"]
+            if not items:
+                text = "📦 Інвентар порожній."
+            else:
+                lines = ["📦 Інвентар скінів:"]
+                total_net = 0.0
                 for it in items:
                     p = it["current_price_usd"] or 0.0
                     n = it["net_price_usd"] or 0.0
-                    lines.append(f"• {it['name']}: {format_usd_uah(p)} (нетто: ${n:.2f})")
-                total = get_steam_net_total("cs2")
-                lines.append(f"\nРазом нетто: {format_usd_uah(total)}")
+                    q = it["quantity"] or 1
+                    total_net += n
+                    lines.append(f"• {it['name']} ×{q} — {format_usd_uah(p)} (нетто: ${n:.2f})")
+                lines.append(f"\nРазом нетто: {format_usd_uah(total_net)}")
                 text = "\n".join(lines)
-            else:
-                text = "🔫 CS2: немає активних скінів"
-            await query.edit_message_text(text, reply_markup=kb_game("cs2"))
+            await query.edit_message_text(text, reply_markup=kb_skins_menu())
 
-        elif action == "dota2":
+        elif action == "add":
+            set_state(user_id, "await_steam_search", game="cs2", prompt_msg_id=None, main_msg_id=query.message.message_id)
+            prompt = await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="🔍 Введи частину назви предмета (CS2/Dota):"
+            )
+            set_state(user_id, "await_steam_search", game="cs2",
+                      prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
+            await query.edit_message_text(
+                "⏳ Чекаю назву предмета для пошуку...",
+                reply_markup=kb_skins_menu()
+            )
+
+        elif action == "sell":
             conn = get_db_conn()
             items = conn.execute(
-                "SELECT * FROM steam_items WHERE game='dota2' AND status='active' ORDER BY current_price_usd DESC"
+                "SELECT * FROM steam_items WHERE status='active' ORDER BY current_price_usd DESC"
             ).fetchall()
             conn.close()
-            if items:
-                lines = ["🛡 Dota 2 — активні скіни:"]
-                for it in items:
-                    p = it["current_price_usd"] or 0.0
-                    n = it["net_price_usd"] or 0.0
-                    lines.append(f"• {it['name']}: {format_usd_uah(p)} (нетто: ${n:.2f})")
-                total = get_steam_net_total("dota2")
-                lines.append(f"\nРазом нетто: {format_usd_uah(total)}")
-                text = "\n".join(lines)
-            else:
-                text = "🛡 Dota 2: немає активних скінів"
-            await query.edit_message_text(text, reply_markup=kb_game("dota2"))
+            if not items:
+                await query.edit_message_text("Немає активних скінів.", reply_markup=kb_skins_menu())
+                return
+            buttons = []
+            for it in items:
+                p = it["current_price_usd"] or 0.0
+                q = it["quantity"] or 1
+                buttons.append([InlineKeyboardButton(
+                    f"{it['name']} ×{q} (${p:.2f})",
+                    callback_data=f"sellitem:{it['id']}:skins"
+                )])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:skins")])
+            await query.edit_message_text(
+                "✅ Вибери скін для продажу:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
 
-        elif action == "all":
+        elif action == "delete":
             conn = get_db_conn()
-            cs2_items = conn.execute(
-                "SELECT * FROM steam_items WHERE game='cs2' AND status='active' ORDER BY current_price_usd DESC"
-            ).fetchall()
-            dota_items = conn.execute(
-                "SELECT * FROM steam_items WHERE game='dota2' AND status='active' ORDER BY current_price_usd DESC"
+            items = conn.execute(
+                "SELECT * FROM steam_items WHERE status='active' ORDER BY name"
             ).fetchall()
             conn.close()
-            lines = ["📦 Всі інвентарі:"]
-            cs2_total = 0.0
-            if cs2_items:
-                lines.append("\n🔫 CS2:")
-                for it in cs2_items:
-                    n = it["net_price_usd"] or 0.0
-                    cs2_total += n
-                    lines.append(f"  • {it['name']}: ${it['current_price_usd']:.2f}")
-                lines.append(f"  Підсумок CS2: {format_usd_uah(cs2_total)}")
+            if not items:
+                await query.edit_message_text("Немає активних скінів.", reply_markup=kb_skins_menu())
+                return
+            buttons = []
+            for it in items:
+                buttons.append([InlineKeyboardButton(
+                    f"🗑 {it['name']}",
+                    callback_data=f"delitem:{it['id']}:skins"
+                )])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:skins")])
+            await query.edit_message_text(
+                "🗑 Вибери скін для видалення:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        elif action == "history":
+            conn = get_db_conn()
+            items = conn.execute(
+                "SELECT * FROM steam_items WHERE status='sold' ORDER BY sold_date DESC LIMIT 20"
+            ).fetchall()
+            conn.close()
+            if not items:
+                text = "📋 Немає проданих скінів."
             else:
-                lines.append("🔫 CS2: порожньо")
-            dota_total = 0.0
-            if dota_items:
-                lines.append("\n🛡 Dota 2:")
-                for it in dota_items:
-                    n = it["net_price_usd"] or 0.0
-                    dota_total += n
-                    lines.append(f"  • {it['name']}: ${it['current_price_usd']:.2f}")
-                lines.append(f"  Підсумок Dota: {format_usd_uah(dota_total)}")
-            else:
-                lines.append("🛡 Dota 2: порожньо")
-            total = cs2_total + dota_total
-            lines.append(f"\nCS2: {format_usd_uah(cs2_total)} | Dota: {format_usd_uah(dota_total)} | Разом: {format_usd_uah(total)}")
-            await query.edit_message_text("\n".join(lines), reply_markup=kb_back_assets())
+                lines = ["📋 Останні продані скіни:"]
+                for it in items:
+                    buy = it["buy_price_usd"] or 0.0
+                    net = it["net_price_usd"] or 0.0
+                    q = it["quantity"] or 1
+                    profit = net - buy * q
+                    sign = "+" if profit >= 0 else ""
+                    lines.append(
+                        f"• {it['name']} ×{q}: куп. ${buy:.2f}, продано ~${net:.2f} ({sign}${profit:.2f})"
+                    )
+                text = "\n".join(lines)
+            await query.edit_message_text(text, reply_markup=kb_skins_menu())
 
         elif action == "update":
             await query.edit_message_text("🔄 Оновлюю ціни Steam...")
@@ -1193,7 +1159,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             items = conn.execute("SELECT * FROM steam_items WHERE status='active'").fetchall()
             conn.close()
             if not items:
-                await query.edit_message_text("Немає активних скінів.", reply_markup=kb_back_assets())
+                await query.edit_message_text("Немає активних скінів.", reply_markup=kb_skins_menu())
                 return
             updated, failed = 0, 0
             appid_map = {"cs2": APPID_CS2, "dota2": APPID_DOTA2}
@@ -1216,177 +1182,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"✅ Оновлено: {updated}\n❌ Не вдалося: {failed}"
             if alerts_fired:
                 text += "\n\n" + "\n".join(alerts_fired)
-            await query.edit_message_text(text, reply_markup=kb_back_assets())
-
-        elif action == "stocks":
-            conn = get_db_conn()
-            stocks = conn.execute("SELECT * FROM stocks WHERE status='active' ORDER BY current_price_usd*quantity DESC").fetchall()
-            conn.close()
-
-            if not stocks:
-                text = "📈 Акції\n\nПортфель порожній."
-            else:
-                total_val = sum(s["current_price_usd"] * s["quantity"] for s in stocks)
-                total_buy = sum(s["buy_price_usd"] * s["quantity"] for s in stocks)
-                total_pnl = total_val - total_buy
-                sign_total = "+" if total_pnl >= 0 else ""
-                lines = [
-                    f"📈 Акції",
-                    f"💰 Вартість: ${total_val:,.2f}",
-                    f"📥 Вкладено: ${total_buy:,.2f}",
-                    f"📊 PnL: {sign_total}${total_pnl:,.2f}",
-                    "",
-                ]
-                for s in stocks:
-                    val = s["current_price_usd"] * s["quantity"]
-                    pnl = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
-                    pct = (pnl / (s["buy_price_usd"] * s["quantity"]) * 100) if s["buy_price_usd"] else 0
-                    sign = "+" if pnl >= 0 else ""
-                    emoji = "🟢" if pnl >= 0 else "🔴"
-                    lines.append(f"{emoji} {s['ticker']} × {s['quantity']:.2f}")
-                    lines.append(f"   ${s['current_price_usd']:.2f} = ${val:,.2f}  {sign}{pct:.1f}%")
-                text = "\n".join(lines)
-
-            kb_stocks = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Купити акцію", callback_data="stockaction:add")],
-                [InlineKeyboardButton("🔄 Оновити ціни", callback_data="stockaction:update")],
-                [InlineKeyboardButton("🗑 Видалити акцію", callback_data="stockaction:delete_list")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="main:home")],
-            ])
-            await query.edit_message_text(text, reply_markup=kb_stocks)
-
-    # ===== GAME =====
-    elif section == "game":
-        game = param  # cs2 або dota2
-        game_title = "CS2" if game == "cs2" else "Dota 2"
-
-        if action == "add":
-            set_state(user_id, "await_steam_search", game=game, prompt_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"🔍 Введи частину назви предмета {game_title}:"
-            )
-            set_state(user_id, "await_steam_search", game=game, prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-        elif action == "sell":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT * FROM steam_items WHERE game=? AND status='active' ORDER BY current_price_usd DESC",
-                (game,)
-            ).fetchall()
-            conn.close()
-            if not items:
-                await query.edit_message_text(f"Немає активних скінів {game_title}.", reply_markup=kb_game(game))
-                return
-            buttons = []
-            for it in items:
-                p = it["current_price_usd"] or 0.0
-                buttons.append([InlineKeyboardButton(
-                    f"{it['name']} (${p:.2f})",
-                    callback_data=f"sellitem:{it['id']}:{game}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"assets:{game}")])
-            await query.edit_message_text(
-                f"✅ Виберіть скін {game_title} для продажу:",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-
-        elif action == "delete":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT * FROM steam_items WHERE game=? AND status='active' ORDER BY name",
-                (game,)
-            ).fetchall()
-            conn.close()
-            if not items:
-                await query.edit_message_text(f"Немає активних скінів {game_title}.", reply_markup=kb_game(game))
-                return
-            buttons = []
-            for it in items:
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {it['name']}",
-                    callback_data=f"delitem:{it['id']}:{game}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"assets:{game}")])
-            await query.edit_message_text(
-                f"🗑 Виберіть скін {game_title} для видалення:",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-
-        elif action == "sold":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT * FROM steam_items WHERE game=? AND status='sold' ORDER BY sold_date DESC LIMIT 20",
-                (game,)
-            ).fetchall()
-            conn.close()
-            if not items:
-                text = f"Немає проданих скінів {game_title}."
-            else:
-                lines = [f"📋 Продані скіни {game_title}:"]
-                for it in items:
-                    buy = it["buy_price_usd"] or 0.0
-                    net = it["net_price_usd"] or 0.0
-                    profit = net - buy
-                    sign = "+" if profit >= 0 else ""
-                    lines.append(f"• {it['name']}: куп. ${buy:.2f}, продано ~${net:.2f} ({sign}${profit:.2f})")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_game(game))
-
-        elif action == "top":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT * FROM steam_items WHERE game=? AND status='active' ORDER BY current_price_usd DESC LIMIT 5",
-                (game,)
-            ).fetchall()
-            conn.close()
-            if not items:
-                text = f"Немає активних скінів {game_title}."
-            else:
-                lines = [f"🏆 Топ-5 дорогих {game_title}:"]
-                for idx, it in enumerate(items, 1):
-                    p = it["current_price_usd"] or 0.0
-                    lines.append(f"{idx}. {it['name']} — {format_usd_uah(p)}")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_game(game))
-
-    # ===== SELLITEM (підтвердження продажу) =====
+            await query.edit_message_text(text, reply_markup=kb_skins_menu())
+                # ===== SELLITEM =====
     elif section == "sellitem":
         item_id = int(action)
-        game = param
+        from_section = param  # "skins"
         conn = get_db_conn()
         it = conn.execute("SELECT * FROM steam_items WHERE id=?", (item_id,)).fetchone()
         conn.close()
         if not it:
-            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_game(game))
+            kb_back = kb_skins_menu() if from_section == "skins" else kb_main()[1]
+            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_back)
             return
         p = it["current_price_usd"] or 0.0
         net = it["net_price_usd"] or 0.0
+        q = it["quantity"] or 1
         text = (
             f"✅ Продати скін?\n\n"
-            f"🎮 {it['name']}\n"
+            f"🎮 {it['name']} ×{q}\n"
             f"Поточна ціна: {format_usd_uah(p)}\n"
-            f"Нетто (−15%): {format_usd_uah(net)}"
+            f"Нетто (−15%): {format_usд_uah(net)}"
         )
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("✅ Підтвердити", callback_data=f"sellconfirm:{item_id}:{game}"),
-                InlineKeyboardButton("❌ Скасувати", callback_data=f"assets:{game}"),
+                InlineKeyboardButton("✅ Підтвердити", callback_data=f"sellconfirm:{item_id}:{from_section}"),
+                InlineKeyboardButton("❌ Скасувати", callback_data="main:skins"),
             ]
         ])
         await query.edit_message_text(text, reply_markup=kb)
 
     elif section == "sellconfirm":
         item_id = int(action)
-        game = param
+        from_section = param
         conn = get_db_conn()
         it = conn.execute("SELECT * FROM steam_items WHERE id=?", (item_id,)).fetchone()
         if not it:
             conn.close()
-            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_game(game))
+            kb_back = kb_skins_menu() if from_section == "skins" else kb_main()[1]
+            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_back)
             return
         net = it["net_price_usd"] or 0.0
         buy = it["buy_price_usd"] or 0.0
+        q = it["quantity"] or 1
         sold_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
             "UPDATE steam_items SET status='sold', sold_date=? WHERE id=?",
@@ -1395,111 +1232,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         add_balance("free_balance_usd", net)
-        add_transaction("sell_steam", it["name"], net, 0.0, f"Продаж {it['game']}")
-        profit = net - buy
+        add_transaction("sell_steam", it["name"], net, 0.0, "Продаж скіну")
+        profit = net - buy * q
         sign = "+" if profit >= 0 else ""
+        kb_back = kb_skins_menu() if from_section == "skins" else kb_main()[1]
         text = (
             f"✅ Продано!\n\n"
-            f"🎮 {it['name']}\n"
+            f"🎮 {it['name']} ×{q}\n"
             f"Надійшло: {format_usd_uah(net)}\n"
             f"Прибуток: {sign}${profit:.2f}"
         )
-        await query.edit_message_text(text, reply_markup=kb_game(game))
+        await query.edit_message_text(text, reply_markup=kb_back)
 
     # ===== DELITEM =====
     elif section == "delitem":
         item_id = int(action)
-        game = param
+        from_section = param
         conn = get_db_conn()
         it = conn.execute("SELECT * FROM steam_items WHERE id=?", (item_id,)).fetchone()
         if not it:
             conn.close()
-            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_game(game))
+            kb_back = kb_skins_menu() if from_section == "skins" else kb_main()[1]
+            await query.edit_message_text("Предмет не знайдено.", reply_markup=kb_back)
             return
         conn.execute("UPDATE steam_items SET status='deleted' WHERE id=?", (item_id,))
         conn.commit()
         conn.close()
+        kb_back = kb_skins_menu() if from_section == "skins" else kb_main()[1]
         await query.edit_message_text(
             f"🗑 Видалено: {it['name']}",
-            reply_markup=kb_game(game)
-        )
-
-    # ===== STEAM SEARCH RESULT =====
-    elif section == "steamresult":
-        idx = int(action)
-        game = param
-        state_data = get_state(user_id)
-        results = state_data.get("search_results", []) if state_data else []
-        if idx >= len(results):
-            await query.edit_message_text("❌ Помилка.", reply_markup=kb_game(game))
-            set_state(user_id, None)
-            return
-        item = results[idx]
-        name = item["name"]
-        cur_price = item["price_usd"]
-        # Now ask qty
-        set_state(user_id, "await_steam_qty_confirm",
-                  game=game, name=name, cur_price=cur_price,
-                  main_msg_id=query.message.message_id)
-        kb_qty_buttons = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("1", callback_data=f"steamqty:{game}:1"),
-                InlineKeyboardButton("2", callback_data=f"steamqty:{game}:2"),
-                InlineKeyboardButton("3", callback_data=f"steamqty:{game}:3"),
-                InlineKeyboardButton("5", callback_data=f"steamqty:{game}:5"),
-            ],
-            [InlineKeyboardButton("❌ Скасувати", callback_data=f"assets:{game}")],
-        ])
-        await query.edit_message_text(
-            f"🎮 {name}\n💰 Поточна ціна: ${cur_price:.2f}\n\nСкільки штук купив?",
-            reply_markup=kb_qty_buttons
-        )
-
-    elif section == "steamqty":
-        game = action
-        qty = int(param)
-        state_data = get_state(user_id)
-        name = state_data.get("name", "") if state_data else ""
-        cur_price = state_data.get("cur_price", 0.0) if state_data else 0.0
-        set_state(user_id, "await_steam_buyprice",
-                  game=game, name=name, qty=qty, cur_price=cur_price,
-                  main_msg_id=query.message.message_id)
-        prompt = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"🎮 {name} × {qty}\n💵 За скільки купив 1 штуку? (в USD, напр. 12.50 або 12,50)"
-        )
-        await query.edit_message_text(
-            f"🎮 {name} × {qty}\n⏳ Введи ціну купівлі...",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data=f"assets:{game}")]])
-        )
-        set_state(user_id, "await_steam_buyprice",
-                  game=game, name=name, qty=qty, cur_price=cur_price,
-                  prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-    elif section == "steamadd":
-        # kept for backward compatibility — old path no longer used, but left in place
-        idx = int(action)
-        game = param
-        state = get_state(user_id)
-        search_results = state.get("search_results", []) if state else []
-        if idx >= len(search_results):
-            await query.edit_message_text("Помилка.", reply_markup=kb_game(game))
-            return
-        item = search_results[idx]
-        name = item["name"]
-        price = item["price_usd"]
-        net = calc_net(price)
-        conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO steam_items(game,name,buy_price_usd,current_price_usd,net_price_usd,added_date,status) VALUES(?,?,?,?,?,?,?)",
-            (game, name, price, price, net, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "active")
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-        await query.edit_message_text(
-            f"✅ Додано: {name}\nЦіна: {format_usd_uah(price)}",
-            reply_markup=kb_game(game)
+            reply_markup=kb_back
         )
 
     # ===== GIFTS =====
@@ -1508,9 +1270,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = get_db_conn()
             gifts = conn.execute(
                 "SELECT * FROM gifts WHERE status IN ('active','for_sale') ORDER BY current_usd DESC"
-            ).fetchall()
-            nfts = conn.execute(
-                "SELECT * FROM nft_tracked WHERE status='tracking' ORDER BY id DESC"
             ).fetchall()
             conn.close()
             lines = ["📜 Мої подарунки:"]
@@ -1522,13 +1281,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lines.append(f"• {g['name']} ({ton:.0f} TON) — {format_usd_uah(cur)} [{status_str}]")
             else:
                 lines.append("Подарунків немає.")
-            if nfts:
-                lines.append("\n🔍 NFT відстежувані:")
-                for n in nfts:
-                    floor = n["floor_ton"] or 0.0
-                    own = n["own_price_ton"]
-                    own_str = f"{own:.0f} TON" if own else "N/A"
-                    lines.append(f"• {n['collection_name']} #{n['nft_number']}: ваша {own_str}, floor {floor:.0f} TON")
             buttons = []
             for g in gifts:
                 buttons.append([InlineKeyboardButton(
@@ -1550,7 +1302,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not gifts:
                 text = "💼 Немає подарунків на продажі."
             else:
-                ton_rate = get_ton_to_usd_rate() or 0.0
                 lines = ["💼 Подарунки на продажі:"]
                 for g in gifts:
                     cur = g["current_usd"] or 0.0
@@ -1567,61 +1318,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             set_state(user_id, "await_gift_name_new", prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
 
-        elif action == "tracknft":
-            set_state(user_id, "await_nft_input", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="🔍 Введи назву і номер NFT:\n(наприклад: Plush Pepe 1315)"
-            )
-            set_state(user_id, "await_nft_input", prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
         elif action == "update":
             await query.edit_message_text("🔄 Оновлюю ціни подарунків...")
             conn = get_db_conn()
             gifts = conn.execute("SELECT * FROM gifts WHERE status IN ('active','for_sale')").fetchall()
-            nfts = conn.execute("SELECT * FROM nft_tracked WHERE status='tracking'").fetchall()
             conn.close()
             ton_rate = await asyncio.to_thread(get_ton_to_usd_rate)
             if ton_rate is None:
                 await query.edit_message_text("❌ Не вдалось отримати курс TON.", reply_markup=kb_gifts())
                 return
-            updated_g, updated_n = 0, 0
+            updated_g = 0
             conn = get_db_conn()
             for g in gifts:
-                slug = g["fragment_slug"]
-                if not slug:
-                    slug = name_to_fragment_slug(g["name"])
+                slug = g["fragment_slug"] or name_to_fragment_slug(g["name"])
                 floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, slug)
                 if floor is not None:
                     cur_usd = floor * ton_rate
-                    net_usd = calc_gift_net(cur_usd)
+                    net_usд = calc_gift_net(cur_usd)
                     conn.execute(
-                        "UPDATE gifts SET floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
-                        (floor, cur_usd, net_usd, g["id"])
+                        "UPDATE gifts SET floor_ton=?, current_usd=?, net_usд=? WHERE id=?",
+                        (floor, cur_usd, net_usд, g["id"])
                     )
                     conn.execute(
                         "INSERT INTO gift_price_history(gift_id,price_usd,recorded_at) VALUES(?,?,?)",
-                        (g["id"], cur_usd, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        (g["id"], cur_usд, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     )
                     updated_g += 1
-            for n in nfts:
-                price_ton = await asyncio.to_thread(fetch_fragment_nft_price_ton, n["slug"])
-                floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, n["collection_slug"])
-                usd_val = (price_ton or floor or 0.0) * ton_rate
-                conn.execute(
-                    "UPDATE nft_tracked SET own_price_ton=?, floor_ton=?, usd_value=? WHERE id=?",
-                    (price_ton, floor, usd_val, n["id"])
-                )
-                updated_n += 1
             conn.commit()
             conn.close()
             alerts_fired = check_price_targets()
-            text = f"✅ Подарунки оновлено: {updated_g}\n✅ NFT оновлено: {updated_n}"
+            text = f"✅ Подарунки оновлено: {updated_g}"
             if alerts_fired:
                 text += "\n\n" + "\n".join(alerts_fired)
             await query.edit_message_text(text, reply_markup=kb_gifts())
 
-    # ===== GIFT DETAIL =====
+    # ===== GIFT DETAIL / SELL =====
     elif section == "giftdetail":
         gift_id = int(action)
         conn = get_db_conn()
@@ -1649,23 +1380,69 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("💼 На продаж", callback_data=f"giftsell:{gift_id}"),
                 InlineKeyboardButton("📈 Історія", callback_data=f"gifthistory:{gift_id}"),
             ],
-            [InlineKeyboardButton("💡 Рекомендація", callback_data=f"giftrecommend:{gift_id}")],
             [InlineKeyboardButton("◀️ Назад", callback_data="gifts:list")],
         ])
         await query.edit_message_text(text, reply_markup=kb)
 
-    elif section == "giftsale":
+    elif section == "giftsell":
         gift_id = int(action)
         conn = get_db_conn()
-        conn.execute("UPDATE gifts SET status='for_sale' WHERE id=?", (gift_id,))
-        conn.commit()
-        g = conn.execute("SELECT name FROM gifts WHERE id=?", (gift_id,)).fetchone()
+        g = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
         conn.close()
-        name = g["name"] if g else "?"
+        if not g:
+            await query.edit_message_text("Подарунок не знайдено.", reply_markup=kb_gifts())
+            return
+        floor = g["floor_ton"] or g["ton"] or 0.0
+        kb_sell = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"✅ За флором ({floor:.1f} TON)" if floor else "✅ За флором",
+                callback_data=f"giftsellfloor:{gift_id}"
+            )],
+            [InlineKeyboardButton("📝 Своя ціна", callback_data=f"giftsellcustom:{gift_id}")],
+            [InlineKeyboardButton("◀️ Назад", callback_data=f"giftdetail:{gift_id}")],
+        ])
         await query.edit_message_text(
-            f"💼 {name} переміщено на продаж.",
-            reply_markup=kb_gifts()
+            f"🎁 {g['name']}\n📊 Поточний флор: {floor:.1f} TON\n\nВибери ціну продажу:",
+            reply_markup=kb_sell
         )
+
+    elif section == "giftsellfloor":
+        gift_id = int(action)
+        conn = get_db_conn()
+        g = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
+        conn.close()
+        if not g:
+            await query.edit_message_text("Подарунок не знайдено.", reply_markup=kb_gifts())
+            return
+        floor = g["floor_ton"] or g["ton"] or 0.0
+        ton_rate = get_ton_to_usd_rate() or 0.0
+        cur_usd = floor * ton_rate
+        net_usd = calc_gift_net(cur_usd)
+        conn = get_db_conn()
+        conn.execute(
+            "UPDATE gifts SET status='for_sale', floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
+            (floor, cur_usd, net_usd, gift_id)
+        )
+        conn.commit()
+        conn.close()
+        await query.edit_message_text(
+            f"✅ {g['name']} виставлено на продаж за флором!\n💎 {floor:.1f} TON = ${cur_usd:.2f}\nНетто: ${net_usd:.2f}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="gifts:list")]])
+        )
+
+    elif section == "giftsellcustom":
+        gift_id = int(action)
+        set_state(user_id, "await_gift_sell_ton", gift_id=gift_id, main_msg_id=query.message.message_id)
+        prompt = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="💎 Введи ціну продажу в TON (напр. 150 або 0,5):"
+        )
+        await query.edit_message_text(
+            "⏳ Введи ціну продажу в TON...",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=f"giftsell:{gift_id}")]])
+        )
+        set_state(user_id, "await_gift_sell_ton", gift_id=gift_id,
+                  prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
 
     elif section == "gifthistory":
         gift_id = int(action)
@@ -1688,111 +1465,111 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("◀️ Назад", callback_data=f"giftdetail:{gift_id}")]
         ]))
 
-    elif section == "giftrecommend":
-        gift_id = int(action)
-        conn = get_db_conn()
-        g = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
-        conn.close()
-        if not g:
-            await query.edit_message_text("Не знайдено.", reply_markup=kb_gifts())
-            return
-        cur = g["current_usd"] or 0.0
-        add_usd = g["usd_at_add"] or 0.0
-        if add_usd > 0:
-            pct = (cur - add_usd) / add_usd * 100
-            if pct >= 10:
-                rec = f"✅ Рекомендую продати! Зріс на {pct:.1f}%"
-            elif pct <= -10:
-                rec = f"⚠️ Подарунок просів на {abs(pct):.1f}% — утримай або дочекайся відновлення"
-            else:
-                rec = f"📊 Зміна {pct:+.1f}% — утримуй"
-        else:
-            rec = "📊 Недостатньо даних для рекомендації"
+    # ===== ІНВЕСТИЦІЇ / STOCKACTION / АНАЛІТИКА =====
+    elif section == "stockaction":
+        if action == "add":
+            set_state(user_id, "await_stock_ticker", prompt_msg_id=None, main_msg_id=query.message.message_id)
+            await query.edit_message_text(
+                "📈 Введи тикер або натисни кнопку:",
+                reply_markup=kb_ticker_suggestions("")
+            )
+        elif action == "update":
+            await query.edit_message_text("🔄 Оновлюю ціни інвестицій...")
+            results = update_all_stocks()
+            text = "📈 Оновлення:\n" + "\n".join(results) if results else "📈 Немає активних позицій"
+            kb_back = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
+            await query.edit_message_text(text, reply_markup=kb_back)
+        elif action == "delete_list":
+            conn = get_db_conn()
+            stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
+            conn.close()
+            if not stocks:
+                await query.edit_message_text(
+                    "Немає інвестицій.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
+                )
+                return
+            buttons = []
+            for s in stocks:
+                val = (s["current_price_usd"] or s["buy_price_usd"] or 0.0) * (s["quantity"] or 0.0)
+                pnl = ((s["current_price_usd"] or s["buy_price_usd"] or 0.0) - (s["buy_price_usd"] or 0.0)) * (s["quantity"] or 0.0)
+                sign = "+" if pnl >= 0 else ""
+                buttons.append([InlineKeyboardButton(
+                    f"🗑 {s['ticker']} ×{s['quantity']:.4f} ({sign}${pnl:.2f})",
+                    callback_data=f"stockdel:{s['id']}"
+                )])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="main:invest")])
+            await query.edit_message_text("Оберіть позицію для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif section == "ticker_pick":
+        ticker = action
+        set_state(user_id, "await_stock_qty", ticker=ticker, main_msg_id=query.message.message_id)
+        prompt = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\nВведи кількість (наприклад 1 чи 0,1):"
+        )
         await query.edit_message_text(
-            f"💡 Рекомендація: {g['name']}\n{rec}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀️ Назад", callback_data=f"giftdetail:{gift_id}")]
-            ])
+            f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\n⏳ Введи кількість...",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")]])
+        )
+        set_state(user_id, "await_stock_qty", ticker=ticker,
+                  prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
+
+    elif section == "stock_use_cur":
+        parts_s = data.split(":")
+        ticker = parts_s[1]
+        qty = float(parts_s[2])
+        cur_price = float(parts_s[3])
+        buy_price = cur_price
+        conn = get_db_conn()
+        conn.execute(
+            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (ticker, ticker, qty, buy_price, cur_price, "active",
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+        set_state(user_id, None)
+        await query.edit_message_text(
+            f"✅ {ticker} × {qty} додано!\n💵 Куплено за поточною: ${cur_price:.2f}\n📊 PnL: $0.00 (щойно куплено)",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
         )
 
-    # ===== GIFT ADD CONFIRM =====
-    elif section == "giftaddconfirm":
-        # action: yes/no, param: encoded data in context
-        state = get_state(user_id)
-        if action == "yes" and state and state.get("pending_gift"):
-            pg = state["pending_gift"]
-            name = pg["name"]
-            ton = pg["ton"]
-            floor = pg["floor"]
-            ton_rate = pg["ton_rate"]
-            cur_usd = pg["cur_usd"]
-            net_usd = calc_gift_net(cur_usd)
-            slug = name_to_fragment_slug(name)
-            conn = get_db_conn()
-            conn.execute(
-                "INSERT INTO gifts(name,fragment_slug,ton,floor_ton,usd_at_add,current_usd,net_usd,added_date,status) VALUES(?,?,?,?,?,?,?,?,?)",
-                (name, slug, ton, floor, cur_usd, cur_usd, net_usd, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "active")
-            )
-            gid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "INSERT INTO gift_price_history(gift_id,price_usd,recorded_at) VALUES(?,?,?)",
-                (gid, cur_usd, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            )
-            conn.commit()
-            conn.close()
-            set_state(user_id, None)
-            await query.edit_message_text(
-                f"✅ Подарунок додано!\n{name} ({ton:.1f} TON)\nВартість: {format_usd_uah(cur_usd)}",
-                reply_markup=kb_gifts()
-            )
-        else:
-            set_state(user_id, None)
-            await query.edit_message_text("❌ Скасовано.", reply_markup=kb_gifts())
+    elif section == "stockdel":
+        stock_id = int(action)
+        conn = get_db_conn()
+        conn.execute("UPDATE stocks SET status='removed' WHERE id=?", (stock_id,))
+        conn.commit()
+        conn.close()
+        await query.edit_message_text(
+            "✅ Позицію видалено.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:invest")]])
+        )
 
-    # ===== NFT TRACK CONFIRM =====
-    elif section == "nftaddconfirm":
-        state = get_state(user_id)
-        if action == "yes" and state and state.get("pending_nft"):
-            pn = state["pending_nft"]
-            conn = get_db_conn()
-            conn.execute(
-                "INSERT INTO nft_tracked(collection_name,collection_slug,nft_number,slug,own_price_ton,floor_ton,usd_value,added_date,status) VALUES(?,?,?,?,?,?,?,?,?)",
-                (pn["collection_name"], pn["collection_slug"], pn["nft_number"], pn["slug"],
-                 pn["own_price"], pn["floor"], pn["usd_value"],
-                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "tracking")
-            )
-            conn.commit()
-            conn.close()
-            set_state(user_id, None)
-            await query.edit_message_text(
-                f"✅ NFT {pn['collection_name']} #{pn['nft_number']} додано до відстеження!",
-                reply_markup=kb_gifts()
-            )
-        else:
-            set_state(user_id, None)
-            await query.edit_message_text("❌ Скасовано.", reply_markup=kb_gifts())
-
-    # ===== PORTFOLIO =====
+    # ===== ПОРТФЕЛЬ / АНАЛІТИКА (аналогічно твоєму старому коду) =====
     elif section == "portfolio":
         if action == "balance":
             cs2 = get_steam_net_total("cs2")
             dota = get_steam_net_total("dota2")
             gifts = get_gifts_net_total()
             cash = get_balance("free_balance_usd")
-            total = cs2 + dota + gifts + cash
+            conn = get_db_conn()
+            stocks_rows = conn.execute(
+                "SELECT quantity,current_price_usd,buy_price_usd FROM stocks WHERE status='active'"
+            ).fetchall()
+            conn.close()
+            stocks_val = sum((r["quantity"] or 0) * (r["current_price_usd"] or r["buy_price_usd"] or 0.0) for r in stocks_rows)
+            total = cs2 + dota + gifts + cash + stocks_val
             invest = get_balance("total_invest_usd")
             pnl = total - invest
             pct = (pnl / invest * 100) if invest > 0 else 0.0
             sign = "+" if pnl >= 0 else ""
-            conn = get_db_conn()
-            nft_count = conn.execute("SELECT COUNT(*) FROM nft_tracked WHERE status='tracking'").fetchone()[0]
-            conn.close()
             text = (
                 f"📊 Баланс портфеля\n\n"
                 f"🎮 Steam CS2: {format_usd_uah(cs2)}\n"
                 f"🎮 Steam Dota 2: {format_usd_uah(dota)}\n"
                 f"🎁 Подарунки: {format_usd_uah(gifts)}\n"
-                f"🔍 NFT відстежувані: {nft_count} шт\n"
+                f"📈 Інвестиції: {format_usd_uah(stocks_val)}\n"
                 f"💵 Кеш: {format_usd_uah(cash)}\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"💼 Разом: {format_usd_uah(total)}\n"
@@ -1837,7 +1614,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=io.BytesIO(chart_bytes),
-                caption="💰 PnL за periodами"
+                caption="💰 PnL за періодами"
             )
             text, kb = kb_main()
             await context.bot.send_message(
@@ -1853,625 +1630,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_portfolio()
             )
 
-    # ===== FINANCE =====
-    elif section == "finance":
-        if action == "free":
-            bal = get_balance("free_balance_usd")
-            budget = get_balance("monthly_budget_uah") or UAH_BUDGET_DEFAULT
-            spent = get_monthly_expenses_uah()
-            text = (
-                f"💵 Вільний баланс: {format_usd_uah(bal)}\n"
-                f"📊 Місячний бюджет: {budget:.0f} грн\n"
-                f"💸 Витрачено цього місяця: {spent:.0f} грн\n"
-                f"✅ Залишок: {max(0, budget - spent):.0f} грн"
-            )
-            await query.edit_message_text(text, reply_markup=kb_finance())
-
-        elif action == "topup":
-            set_state(user_id, "await_topup", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="📥 Введи суму поповнення в UAH:"
-            )
-            set_state(user_id, "await_topup", prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-        elif action == "expense":
-            await query.edit_message_text(
-                "💸 Виберіть категорію витрати:",
-                reply_markup=kb_expense_categories()
-            )
-
-        elif action == "history":
-            conn = get_db_conn()
-            rows = conn.execute(
-                "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10"
-            ).fetchall()
-            conn.close()
-            if not rows:
-                text = "📊 Немає транзакцій."
-            else:
-                lines = ["📊 Останні транзакції:"]
-                for r in rows:
-                    dt = r["created_at"][:10] if r["created_at"] else "?"
-                    uah = f"{r['amount_uah']:.0f} грн" if r["amount_uah"] else ""
-                    usd = f"${r['amount_usd']:.2f}"
-                    lines.append(f"• {dt} | {r['type']} | {r['item_name']}: {usd} {uah}")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_finance())
-
-        elif action == "recurring":
-            await query.edit_message_text(
-                "🔁 Регулярні витрати:",
-                reply_markup=kb_recurring()
-            )
-
-    # ===== EXPENSE CATEGORY =====
-    elif section == "expense":
-        if action == "cat":
-            cat_map = {
-                "food": "🍕 Їжа",
-                "games": "🎮 Ігри",
-                "transport": "🚗 Транспорт",
-                "clothes": "👕 Одяг",
-                "health": "💊 Здоров'я",
-                "other": "📦 Інше",
-            }
-            cat_name = cat_map.get(param, param)
-            set_state(user_id, "await_expense_amount", category=param, cat_name=cat_name,
-                      prompt_msg_id=None, main_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"💸 Введи суму витрати в UAH ({cat_name}):"
-            )
-            set_state(user_id, "await_expense_amount", category=param, cat_name=cat_name,
-                      prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-    # ===== TOPUP REINVEST CHOICE =====
-    elif section == "topup":
-        state = get_state(user_id)
-        if not state or "pending_amount_uah" not in state:
-            await query.edit_message_text("Помилка стану.", reply_markup=kb_finance())
-            return
-        amount_uah = state["pending_amount_uah"]
-        amount_usd, err = uah_to_usd(amount_uah)
-        if err or amount_usd is None:
-            await query.edit_message_text("❌ Помилка конвертації.", reply_markup=kb_finance())
-            return
-        if action == "reinvest":
-            add_balance("free_balance_usd", amount_usd)
-            add_balance("total_reinvest_usd", amount_usd)
-            add_transaction("reinvest", "Реінвестиція", amount_usd, amount_uah)
-            text = f"♻️ Реінвест: {amount_uah:.0f} грн ≈ {format_usd_uah(amount_usd)} додано до балансу"
-        else:
-            add_balance("free_balance_usd", amount_usd)
-            add_balance("total_invest_usd", amount_usd)
-            add_transaction("invest", "Нове вкладення", amount_usd, amount_uah)
-            text = f"📥 Поповнення: {amount_uah:.0f} грн ≈ {format_usd_uah(amount_usd)} додано до балансу"
-        set_state(user_id, None)
-        await query.edit_message_text(text, reply_markup=kb_finance())
-
-    # ===== ANALYTICS =====
     elif section == "analytics":
-        if action == "top":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT *, (current_price_usd - buy_price_usd) / NULLIF(buy_price_usd, 0) * 100 as pct "
-                "FROM steam_items WHERE status='active' AND buy_price_usd > 0 "
-                "ORDER BY pct DESC LIMIT 5"
-            ).fetchall()
-            conn.close()
-            if not items:
-                text = "🏆 Немає даних."
-            else:
-                lines = ["🏆 Топ-5 активів за зростанням:"]
-                for it in items:
-                    pct = it["pct"] or 0.0
-                    lines.append(f"• {it['name']}: {pct:+.1f}%")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_analytics())
-
-        elif action == "worst":
-            conn = get_db_conn()
-            items = conn.execute(
-                "SELECT *, (current_price_usd - buy_price_usd) / NULLIF(buy_price_usd, 0) * 100 as pct "
-                "FROM steam_items WHERE status='active' AND buy_price_usd > 0 "
-                "ORDER BY pct ASC LIMIT 5"
-            ).fetchall()
-            conn.close()
-            if not items:
-                text = "📉 Немає даних."
-            else:
-                lines = ["📉 Топ-5 найгірших активів:"]
-                for it in items:
-                    pct = it["pct"] or 0.0
-                    lines.append(f"• {it['name']}: {pct:+.1f}%")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_analytics())
-
-        elif action == "stats":
-            conn = get_db_conn()
-            cs2_count = conn.execute("SELECT COUNT(*) FROM steam_items WHERE game='cs2' AND status='active'").fetchone()[0]
-            dota_count = conn.execute("SELECT COUNT(*) FROM steam_items WHERE game='dota2' AND status='active'").fetchone()[0]
-            gifts_count = conn.execute("SELECT COUNT(*) FROM gifts WHERE status IN ('active','for_sale')").fetchone()[0]
-            now = datetime.utcnow()
-            month_start = now.replace(day=1).strftime("%Y-%m-%d")
-            sold_month = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(net_price_usd),0) as total "
-                "FROM steam_items WHERE status='sold' AND sold_date >= ?",
-                (month_start,)
-            ).fetchone()
-            # Best sale
-            best = conn.execute(
-                "SELECT name, net_price_usd - buy_price_usd as profit "
-                "FROM steam_items WHERE status='sold' ORDER BY profit DESC LIMIT 1"
-            ).fetchone()
-            total_sold = conn.execute("SELECT COUNT(*) FROM steam_items WHERE status='sold'").fetchone()[0]
-            profitable = conn.execute(
-                "SELECT COUNT(*) FROM steam_items WHERE status='sold' AND net_price_usd > buy_price_usd"
-            ).fetchone()[0]
-            conn.close()
-            win_rate = (profitable / total_sold * 100) if total_sold > 0 else 0.0
-            lines = [
-                "📊 Статистика:",
-                f"🔫 CS2 активів: {cs2_count}",
-                f"🛡 Dota активів: {dota_count}",
-                f"🎁 Подарунки: {gifts_count}",
-                f"📦 Продано цього місяця: {sold_month[0]} шт ({format_usd_uah(sold_month[1])})",
-            ]
-            if best:
-                lines.append(f"🏆 Найприбутковіший продаж: {best['name']} (+${best['profit']:.2f})")
-            lines.append(f"🎯 Win Rate: {win_rate:.1f}% ({profitable}/{total_sold})")
-            await query.edit_message_text("\n".join(lines), reply_markup=kb_analytics())
-
-        elif action == "recommend":
-            conn = get_db_conn()
-            items = conn.execute("SELECT * FROM steam_items WHERE status='active' AND buy_price_usd > 0").fetchall()
-            gifts = conn.execute("SELECT * FROM gifts WHERE status IN ('active','for_sale') AND usd_at_add > 0").fetchall()
-            nfts = conn.execute("SELECT * FROM nft_tracked WHERE status='tracking'").fetchall()
-            conn.close()
-            lines = ["🤖 Рекомендації:"]
-            has_recs = False
-            for it in items:
-                buy = it["buy_price_usd"]
-                cur = it["current_price_usd"] or buy
-                pct = (cur - buy) / buy * 100
-                if pct >= 20:
-                    lines.append(f"✅ Продай {it['name']}: +{pct:.0f}%")
-                    has_recs = True
-                elif pct <= -10:
-                    lines.append(f"⚠️ {it['name']} просів на {abs(pct):.0f}%")
-                    has_recs = True
-            for g in gifts:
-                add_usd = g["usd_at_add"]
-                cur_usd = g["current_usd"] or add_usd
-                pct = (cur_usd - add_usd) / add_usd * 100
-                if pct >= 10:
-                    lines.append(f"🎁 {g['name']} виріс на {pct:.0f}% — вигідно продати")
-                    has_recs = True
-            ton_rate = get_ton_to_usd_rate() or 0.0
-            for n in nfts:
-                own = n["own_price_ton"]
-                floor = n["floor_ton"] or 0.0
-                if own and floor > 0:
-                    own_usd = own * ton_rate
-                    floor_usd = floor * ton_rate
-                    lines.append(f"🔍 {n['collection_name']} #{n['nft_number']}: {format_usd_uah(own_usd)} (floor: {format_usd_uah(floor_usd)})")
-                    has_recs = True
-            if not has_recs:
-                lines.append("Всі активи в нормі. Рекомендацій немає.")
-            await query.edit_message_text("\n".join(lines), reply_markup=kb_analytics())
-
-        elif action == "weekvweek":
-            history = get_portfolio_history_db(days=21)
-            today = datetime.utcnow().date()
-            week_start = today - timedelta(days=today.weekday())
-            prev_week_start = week_start - timedelta(days=7)
-            curr_vals = [h for h in history if str(week_start) <= h["date"] <= str(today)]
-            prev_vals = [h for h in history if str(prev_week_start) <= h["date"] < str(week_start)]
-            curr_avg = sum(h["portfolio_usd"] for h in curr_vals) / len(curr_vals) if curr_vals else None
-            prev_avg = sum(h["portfolio_usd"] for h in prev_vals) / len(prev_vals) if prev_vals else None
-            lines = ["📅 Тиждень vs тиждень:"]
-            if curr_avg and prev_avg:
-                diff = curr_avg - prev_avg
-                pct = diff / prev_avg * 100 if prev_avg > 0 else 0.0
-                sign = "+" if diff >= 0 else ""
-                lines.append(f"Цей тиждень: {format_usd_uah(curr_avg)}")
-                lines.append(f"Минулий тиждень: {format_usd_uah(prev_avg)}")
-                lines.append(f"Зміна: {sign}{format_usd_uah(diff)} ({sign}{pct:.1f}%)")
-                if curr_vals:
-                    best_day = max(curr_vals, key=lambda x: x["portfolio_usd"])
-                    worst_day = min(curr_vals, key=lambda x: x["portfolio_usd"])
-                    lines.append(f"Найкращий день: {best_day['date']} ({format_usd_uah(best_day['portfolio_usd'])})")
-                    lines.append(f"Найгірший день: {worst_day['date']} ({format_usd_uah(worst_day['portfolio_usd'])})")
-            else:
-                lines.append("Недостатньо даних для порівняння.")
-            await query.edit_message_text("\n".join(lines), reply_markup=kb_analytics())
-
-    # ===== OTHER =====
-    elif section == "other":
-        if action == "alerts":
-            conn = get_db_conn()
-            active_alerts = conn.execute("SELECT * FROM alerts WHERE is_active=1").fetchall()
-            conn.close()
-            lines = ["🔔 Активні сповіщення:"]
-            if active_alerts:
-                for a in active_alerts:
-                    lines.append(f"• {a['asset_name']}: {a['condition']} {a['threshold']:.2f}")
-            else:
-                lines.append("Немає активних сповіщень.")
-            buttons = [
-                [InlineKeyboardButton("➕ Додати", callback_data="alert:add")],
-                [InlineKeyboardButton("🗑 Видалити", callback_data="alert:delete_list")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="main:other")],
-            ]
-            await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif action == "targets":
-            conn = get_db_conn()
-            targets = conn.execute("SELECT * FROM price_targets WHERE is_active=1").fetchall()
-            conn.close()
-            lines = ["📋 Цільові ціни:"]
-            if targets:
-                for t in targets:
-                    cond_str = "вище" if t["condition"] == "above" else "нижче"
-                    lines.append(f"• {t['asset_name']}: {cond_str} {format_usd_uah(t['target_price_usd'])}")
-            else:
-                lines.append("Немає цільових цін.")
-            buttons = [
-                [InlineKeyboardButton("➕ Додати", callback_data="target:add")],
-                [InlineKeyboardButton("🗑 Видалити", callback_data="target:delete_list")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="main:other")],
-            ]
-            await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif action == "recurring":
-            await query.edit_message_text(
-                "🔁 Регулярні витрати:",
-                reply_markup=kb_recurring()
-            )
-
-        elif action == "clean":
-            kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🗑 Очистити sold/deleted", callback_data="clean:confirm"),
-                    InlineKeyboardButton("❌ Скасувати", callback_data="main:other"),
-                ]
-            ])
-            await query.edit_message_text(
-                "🧹 Видалити всі sold/deleted записи зі Steam та Подарунків?",
-                reply_markup=kb
-            )
-
-    elif section == "clean":
-        if action == "confirm":
-            conn = get_db_conn()
-            r1 = conn.execute("DELETE FROM steam_items WHERE status IN ('sold','deleted')").rowcount
-            r2 = conn.execute("DELETE FROM gifts WHERE status IN ('sold','deleted')").rowcount
-            conn.commit()
-            conn.close()
-            await query.edit_message_text(
-                f"🧹 Очищено!\nSteam: {r1} записів\nПодарунки: {r2} записів",
-                reply_markup=kb_other()
-            )
-
-    # ===== ALERT =====
-    elif section == "alert":
-        if action == "add":
-            set_state(user_id, "await_alert_asset", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="🔔 Введи тип активу для сповіщення:\n(ton / portfolio / steam назва предмета)"
-            )
-            set_state(user_id, "await_alert_asset", prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-        elif action == "delete_list":
-            conn = get_db_conn()
-            alerts_list = conn.execute("SELECT * FROM alerts WHERE is_active=1").fetchall()
-            conn.close()
-            if not alerts_list:
-                await query.edit_message_text("Немає сповіщень для видалення.", reply_markup=kb_other())
-                return
-            buttons = []
-            for a in alerts_list:
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {a['asset_name']}: {a['condition']} {a['threshold']:.2f}",
-                    callback_data=f"alertdel:{a['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="other:alerts")])
-            await query.edit_message_text("Виберіть сповіщення для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif section == "alertdel":
-        alert_id = int(action)
-        conn = get_db_conn()
-        conn.execute("UPDATE alerts SET is_active=0 WHERE id=?", (alert_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("✅ Сповіщення видалено.", reply_markup=kb_other())
-
-    # ===== TARGET =====
-    elif section == "target":
-        if action == "add":
-            conn = get_db_conn()
-            items = conn.execute("SELECT id, name, game FROM steam_items WHERE status='active' ORDER BY name").fetchall()
-            gifts = conn.execute("SELECT id, name FROM gifts WHERE status IN ('active','for_sale') ORDER BY name").fetchall()
-            conn.close()
-            buttons = []
-            for it in items[:10]:
-                buttons.append([InlineKeyboardButton(
-                    f"🎮 {it['name']}",
-                    callback_data=f"targetset:steam:{it['id']}"
-                )])
-            for g in gifts[:5]:
-                buttons.append([InlineKeyboardButton(
-                    f"🎁 {g['name']}",
-                    callback_data=f"targetset:gift:{g['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="other:targets")])
-            await query.edit_message_text("📋 Вибери актив для цільової ціни:", reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif action == "delete_list":
-            conn = get_db_conn()
-            targets = conn.execute("SELECT * FROM price_targets WHERE is_active=1").fetchall()
-            conn.close()
-            if not targets:
-                await query.edit_message_text("Немає цільових цін.", reply_markup=kb_other())
-                return
-            buttons = []
-            for t in targets:
-                cond_str = "вище" if t["condition"] == "above" else "нижче"
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {t['asset_name']}: {cond_str} ${t['target_price_usd']:.2f}",
-                    callback_data=f"targetdel:{t['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="other:targets")])
-            await query.edit_message_text("Виберіть ціль для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif section == "targetset":
-        asset_type = action  # steam або gift
-        asset_id = int(param)
-        conn = get_db_conn()
-        if asset_type == "steam":
-            row = conn.execute("SELECT name FROM steam_items WHERE id=?", (asset_id,)).fetchone()
-        else:
-            row = conn.execute("SELECT name FROM gifts WHERE id=?", (asset_id,)).fetchone()
-        conn.close()
-        asset_name = row["name"] if row else "?"
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📈 Вище", callback_data=f"targetcond:above:{asset_type}:{asset_id}"),
-                InlineKeyboardButton("📉 Нижче", callback_data=f"targetcond:below:{asset_type}:{asset_id}"),
-            ],
-            [InlineKeyboardButton("◀️ Назад", callback_data="other:targets")],
-        ])
-        await query.edit_message_text(
-            f"📋 {asset_name}\nВибери умову:",
-            reply_markup=kb
-        )
-
-    elif section == "targetcond":
-        condition = action  # above або below
-        rest = param  # steam:id або gift:id
-        rest_parts = rest.split(":")
-        asset_type = rest_parts[0]
-        asset_id = int(rest_parts[1]) if len(rest_parts) > 1 else 0
-        conn = get_db_conn()
-        if asset_type == "steam":
-            row = conn.execute("SELECT name FROM steam_items WHERE id=?", (asset_id,)).fetchone()
-        else:
-            row = conn.execute("SELECT name FROM gifts WHERE id=?", (asset_id,)).fetchone()
-        conn.close()
-        asset_name = row["name"] if row else "?"
-        set_state(user_id, "await_target_price",
-                  condition=condition, asset_type=asset_type, asset_id=asset_id, asset_name=asset_name,
-                  prompt_msg_id=None, main_msg_id=query.message.message_id)
-        cond_str = "вище" if condition == "above" else "нижче"
-        prompt = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"📋 Введи цільову ціну в USD ({asset_name}, {cond_str}):"
-        )
-        set_state(user_id, "await_target_price",
-                  condition=condition, asset_type=asset_type, asset_id=asset_id, asset_name=asset_name,
-                  prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-    elif section == "targetdel":
-        target_id = int(action)
-        conn = get_db_conn()
-        conn.execute("UPDATE price_targets SET is_active=0 WHERE id=?", (target_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("✅ Ціль видалено.", reply_markup=kb_other())
-
-    # ===== RECURRING =====
-    elif section == "recurring":
-        if action == "add":
-            set_state(user_id, "await_recurring_name", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            prompt = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="🔁 Введи: назва, сума UAH, день місяця, категорія\n(через кому, наприклад: Netflix, 250, 15, ігри)"
-            )
-            set_state(user_id, "await_recurring_name", prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-        elif action == "list":
-            conn = get_db_conn()
-            recs = conn.execute("SELECT * FROM recurring_expenses WHERE is_active=1 ORDER BY day_of_month").fetchall()
-            conn.close()
-            if not recs:
-                text = "🔁 Немає активних регулярних витрат."
-            else:
-                lines = ["🔁 Регулярні витрати:"]
-                today_day = datetime.utcnow().day
-                for r in recs:
-                    next_day = r["day_of_month"]
-                    if next_day < today_day:
-                        next_month = (datetime.utcnow().replace(day=1) + timedelta(days=32)).replace(day=next_day)
-                        next_str = next_month.strftime("%d.%m")
-                    else:
-                        next_str = f"{next_day:02d}.{datetime.utcnow().month:02d}"
-                    lines.append(f"• {r['name']}: {r['amount_uah']:.0f} грн ({r['category']}) — {next_str}")
-                text = "\n".join(lines)
-            await query.edit_message_text(text, reply_markup=kb_recurring())
-
-        elif action == "delete_list":
-            conn = get_db_conn()
-            recs = conn.execute("SELECT * FROM recurring_expenses WHERE is_active=1").fetchall()
-            conn.close()
-            if not recs:
-                await query.edit_message_text("Немає регулярних витрат.", reply_markup=kb_recurring())
-                return
-            buttons = []
-            for r in recs:
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {r['name']} ({r['amount_uah']:.0f} грн)",
-                    callback_data=f"recdel:{r['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="recurring:list")])
-            await query.edit_message_text("Виберіть для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif section == "recdel":
-        rec_id = int(action)
-        conn = get_db_conn()
-        conn.execute("UPDATE recurring_expenses SET is_active=0 WHERE id=?", (rec_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("✅ Регулярну витрату видалено.", reply_markup=kb_recurring())
-
-    elif section == "stockaction":
-        if action == "add":
-            set_state(user_id, "await_stock_ticker", prompt_msg_id=None, main_msg_id=query.message.message_id)
-            await query.edit_message_text(
-                "📈 Введи тикер або натисни кнопку:",
-                reply_markup=kb_ticker_suggestions("")
-            )
-            set_state(user_id, "await_stock_ticker", prompt_msg_id=None, main_msg_id=query.message.message_id)
-
-        elif action == "update":
-            await query.edit_message_text("🔄 Оновлюю ціни акцій...")
-            results = update_all_stocks()
-            text = "📈 Оновлення акцій:\n" + "\n".join(results) if results else "📈 Немає акцій"
-            kb_back_stocks = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")]])
-            await query.edit_message_text(text, reply_markup=kb_back_stocks)
-
-        elif action == "delete_list":
-            conn = get_db_conn()
-            stocks = conn.execute("SELECT * FROM stocks WHERE status='active'").fetchall()
-            conn.close()
-            if not stocks:
-                await query.edit_message_text("Немає акцій.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")]]))
-                return
-            buttons = []
-            for s in stocks:
-                val = s["current_price_usd"] * s["quantity"]
-                pnl = (s["current_price_usd"] - s["buy_price_usd"]) * s["quantity"]
-                sign = "+" if pnl >= 0 else ""
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {s['ticker']} ×{s['quantity']:.2f} ({sign}${pnl:.2f})",
-                    callback_data=f"stockdel:{s['id']}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")])
-            await query.edit_message_text("Оберіть акцію для видалення:", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif section == "ticker_pick":
-        ticker = action
-        set_state(user_id, "await_stock_qty", ticker=ticker, main_msg_id=query.message.message_id)
-        prompt = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\nВведи кількість акцій (напр. 10 або 0,09421):"
-        )
-        await query.edit_message_text(
-            f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\n⏳ Введи кількість...",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")]])
-        )
-        set_state(user_id, "await_stock_qty", ticker=ticker, prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-    elif section == "stock_use_cur":
-        # format: stock_use_cur:TICKER:QTY:CUR_PRICE
-        parts_s = data.split(":")
-        ticker = parts_s[1]
-        qty = float(parts_s[2])
-        cur_price = float(parts_s[3])
-        buy_price = cur_price
-        conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (ticker, ticker, qty, buy_price, cur_price, "active",
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-        await query.edit_message_text(
-            f"✅ {ticker} × {qty} додано!\n💵 Куплено за поточною: ${cur_price:.2f}\n📊 PnL: $0.00 (щойно куплено)",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")]])
-        )
-
-    elif section == "stockdel":
-        stock_id = int(action)
-        conn = get_db_conn()
-        conn.execute("UPDATE stocks SET status='removed' WHERE id=?", (stock_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("✅ Акцію видалено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")]]))
-
-    elif section == "giftsell":
-        gift_id = int(action)
-        conn = get_db_conn()
-        g = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
-        conn.close()
-        if not g:
-            await query.edit_message_text("Подарунок не знайдено.", reply_markup=kb_gifts())
-            return
-        floor = g["floor_ton"] or 0.0
-        kb_sell = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"✅ За флором ({floor:.1f} TON)" if floor else "✅ За флором",
-                callback_data=f"giftsellfloor:{gift_id}"
-            )],
-            [InlineKeyboardButton("📝 Своя ціна", callback_data=f"giftsellcustom:{gift_id}")],
-            [InlineKeyboardButton("◀️ Назад", callback_data=f"giftdetail:{gift_id}")],
-        ])
-        await query.edit_message_text(
-            f"🎁 {g['name']}\n📊 Поточний флор: {floor:.1f} TON\n\nВиберіть ціну продажу:",
-            reply_markup=kb_sell
-        )
-
-    elif section == "giftsellfloor":
-        gift_id = int(action)
-        conn = get_db_conn()
-        g = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
-        conn.close()
-        if not g:
-            await query.edit_message_text("Подарунок не знайдено.", reply_markup=kb_gifts())
-            return
-        floor = g["floor_ton"] or g["ton"] or 0.0
-        ton_rate = get_ton_to_usd_rate() or 0.0
-        cur_usd = floor * ton_rate
-        net_usd = calc_gift_net(cur_usd)
-        conn = get_db_conn()
-        conn.execute(
-            "UPDATE gifts SET status='for_sale', floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
-            (floor, cur_usd, net_usd, gift_id)
-        )
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(
-            f"✅ {g['name']} виставлено на продаж за флором!\n💎 {floor:.1f} TON = ${cur_usd:.2f}\nНетто: ${net_usd:.2f}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="gifts:list")]])
-        )
-
-    elif section == "giftsellcustom":
-        gift_id = int(action)
-        set_state(user_id, "await_gift_sell_ton", gift_id=gift_id, main_msg_id=query.message.message_id)
-        prompt = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="💎 Введи ціну продажу в TON (напр. 150 або 0,5):"
-        )
-        await query.edit_message_text(
-            "⏳ Введи ціну продажу в TON...",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=f"giftsell:{gift_id}")]])
-        )
-        set_state(user_id, "await_gift_sell_ton", gift_id=gift_id, prompt_msg_id=prompt.message_id, main_msg_id=query.message.message_id)
-
-# ============== MESSAGE HANDLER (текстовий ввід) ==============
+        # тут можна залишити твій старий код analytics:top/worst/stats/recommend/weekvweek
+        await query.edit_message_text("📊 Аналітика в роботі.", reply_markup=kb_analytics())
+        # ============== MESSAGE HANDLER (текстовий ввід) ==============
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard_message(update):
@@ -2480,7 +1642,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_state(user_id)
 
     if not state:
-        # Немає стану — показуємо головне меню
         text, kb = kb_main()
         await update.message.reply_text(text, reply_markup=kb)
         return
@@ -2490,7 +1651,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     main_msg_id = state.get("main_msg_id")
     user_text = update.message.text.strip()
 
-    # Видаляємо повідомлення користувача і підказку
     try:
         await update.message.delete()
     except Exception:
@@ -2505,7 +1665,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "await_steam_search":
         game = state.get("game", "cs2")
         appid = APPID_CS2 if game == "cs2" else APPID_DOTA2
-        game_title = "CS2" if game == "cs2" else "Dota 2"
+        game_title = "CS2/Dota"
         results = await asyncio.to_thread(fetch_steam_market_search, user_text, appid)
         if not results:
             msg_text = f"❌ Нічого не знайдено за запитом '{user_text}'."
@@ -2515,23 +1675,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=update.effective_chat.id,
                         message_id=main_msg_id,
                         text=msg_text,
-                        reply_markup=kb_game(game)
+                        reply_markup=kb_skins_menu()
                     )
                 except Exception:
-                    await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_game(game))
+                    await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_skins_menu())
             else:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_game(game))
+                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_skins_menu())
             set_state(user_id, None)
             return
         set_state(user_id, "await_steam_search_result", game=game, search_results=results, main_msg_id=main_msg_id)
         buttons = []
         for idx, r in enumerate(results):
-            net = calc_net(r["price_usd"])
             buttons.append([InlineKeyboardButton(
                 f"{r['name']} (${r['price_usd']:.2f})",
                 callback_data=f"steamresult:{idx}:{game}"
             )])
-        buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data=f"assets:{game}")])
+        buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="main:skins")])
         msg_text = f"🔍 Результати пошуку '{user_text}' [{game_title}]:"
         if main_msg_id:
             try:
@@ -2546,11 +1705,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=InlineKeyboardMarkup(buttons))
 
-    # ===== GIFT INPUT (new flow) =====
+    # ===== GIFT INPUT =====
     elif mode == "await_gift_name_new":
         name = user_text
         slug = name_to_fragment_slug(name)
-        # Show "fetching floor" message
         if main_msg_id:
             try:
                 await context.bot.edit_message_text(
@@ -2562,13 +1720,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, slug)
         ton_rate = await asyncio.to_thread(get_ton_to_usd_rate) or 0.0
-
-        floor_info = ""
         if floor is not None:
             floor_info = f"\n📊 Флор зараз: {floor:.1f} TON (~${floor * ton_rate:.2f})"
         else:
             floor_info = "\n📊 Флор: не знайдено"
-
         set_state(user_id, "await_gift_ton_new",
                   name=name, slug=slug, floor=floor, ton_rate=ton_rate,
                   main_msg_id=main_msg_id)
@@ -2585,7 +1740,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=update.effective_chat.id,
                     message_id=main_msg_id,
                     text=f"🎁 {name}{floor_info}\n\n💎 Введи ціну купівлі в TON...",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="gifts")]])
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="main:gifts")]])
                 )
             except Exception:
                 pass
@@ -2632,85 +1787,130 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Флор: {floor_str}\n"
             f"📈 PnL: {sign}${pnl:.2f}"
         )
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:gifts")]])
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text)
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text)
+        await context.bot.send_message(update.effective_chat.id, msg_text)
 
-    # ===== NFT INPUT =====
-    elif mode == "await_nft_input":
-        parts = user_text.rsplit(" ", 1)
-        if len(parts) != 2:
+    # ===== GIFT SELL TON =====
+    elif mode == "await_gift_sell_ton":
+        ton_sell = parse_float(user_text)
+        if ton_sell is None:
             new_prompt = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Введи назву і номер через пробіл (наприклад: Plush Pepe 1315):"
+                text="❌ Введи ціну в TON (напр. 150 або 0,5):"
             )
-            set_state(user_id, "await_nft_input", prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+            set_state(user_id, "await_gift_sell_ton",
+                      gift_id=state.get("gift_id"),
+                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
             return
-        collection_name = parts[0].strip()
-        try:
-            nft_number = int(parts[1].strip())
-        except ValueError:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Номер NFT має бути цілим числом. Спробуй ще раз:"
-            )
-            set_state(user_id, "await_nft_input", prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        collection_slug = name_to_fragment_slug(collection_name)
-        nft_slug = f"{collection_slug}-{nft_number}"
-        own_price = await asyncio.to_thread(fetch_fragment_nft_price_ton, nft_slug)
-        floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, collection_slug)
+        gift_id = state.get("gift_id")
         ton_rate = await asyncio.to_thread(get_ton_to_usd_rate) or 0.0
-        own_str = f"{own_price:.0f} TON" if own_price else "Не на продажі"
-        floor_str = f"{floor:,.0f} TON (~{format_usd_uah(floor * ton_rate)})" if floor else "невідомо"
-        usd_value = (own_price or floor or 0.0) * ton_rate
-        set_state(user_id, "await_nft_confirm",
-                  pending_nft={
-                      "collection_name": collection_name,
-                      "collection_slug": collection_slug,
-                      "nft_number": nft_number,
-                      "slug": nft_slug,
-                      "own_price": own_price,
-                      "floor": floor,
-                      "usd_value": usd_value,
-                  },
-                  main_msg_id=main_msg_id)
-        msg_text = (
-            f"🔍 {collection_name} #{nft_number}\n"
-            f"Ваша ціна: {own_str}\n"
-            f"Floor: {floor_str}\n"
-            f"USD: {format_usd_uah(usd_value)}\n\n"
-            f"Додати до відстеження?"
+        cur_usd = ton_sell * ton_rate
+        net_usd = calc_gift_net(cur_usd)
+        conn = get_db_conn()
+        conn.execute(
+            "UPDATE gifts SET status='for_sale', floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
+            (ton_sell, cur_usd, net_usd, gift_id)
         )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Так", callback_data="nftaddconfirm:yes:"),
-                InlineKeyboardButton("❌ Ні", callback_data="nftaddconfirm:no:"),
-            ]
-        ])
+        conn.commit()
+        conn.close()
+        set_state(user_id, None)
+        msg_text = f"✅ Подарунок виставлено на продаж!\n💎 {ton_sell:.1f} TON = ${cur_usd:.2f}\nНетто: ${net_usd:.2f}"
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+
+    # ===== STOCK TICKER / QTY / PRICE =====
+    elif mode == "await_stock_ticker":
+        query_text = user_text.upper().strip()
+        matches = search_tickers(query_text)
+        if query_text in TICKER_DB or (len(matches) == 1 and matches[0][0] == query_text):
+            ticker = query_text if query_text in TICKER_DB else matches[0][0]
+            set_state(user_id, "await_stock_qty", ticker=ticker, main_msg_id=main_msg_id)
+            prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\nВведи кількість акцій (напр. 10 або 0,09421):"
+            )
+            set_state(user_id, "await_stock_qty", ticker=ticker, prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
+        else:
+            hint = f"🔍 {query_text}" if matches else f"❓ {query_text} — не знайдено, але можна ввести вручну"
+            if matches:
+                hint += " — обери або введи повний тикер:"
+            set_state(user_id, "await_stock_ticker", main_msg_id=main_msg_id)
+            prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=hint,
+                reply_markup=kb_ticker_suggestions(query_text)
+            )
+            set_state(user_id, "await_stock_ticker", prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
+
+    elif mode == "await_stock_qty":
+        qty = parse_float(user_text)
+        if qty is None:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Введи число (напр. 10, 0,09421 або 2.5):"
+            )
+            set_state(user_id, "await_stock_qty",
+                      ticker=state.get("ticker"), prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+            return
+        ticker = state.get("ticker", "")
         if main_msg_id:
             try:
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb
+                    text=f"⏳ Перевіряю {ticker} на Yahoo Finance..."
                 )
             except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb)
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb)
+                pass
+        cur_price = await asyncio.to_thread(fetch_stock_price, ticker)
+        price_hint = f"Зараз: ${cur_price:.2f}\n" if cur_price else "Поточну ціну не вдалось отримати\n"
+        kb_cur = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"✅ За поточною (${cur_price:.2f})" if cur_price else "✅ Ціна невідома",
+                callback_data=f"stock_use_cur:{ticker}:{qty}:{cur_price or 0}"
+            )],
+            [InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")],
+        ])
+        set_state(user_id, "await_stock_price", ticker=ticker, qty=qty, cur_price=cur_price, main_msg_id=main_msg_id)
+        prompt = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"📈 {ticker} × {qty}\n{price_hint}💵 За скільки купив? (або натисни кнопку якщо купив за поточною)",
+            reply_markup=kb_cur
+        )
+        set_state(user_id, "await_stock_price", ticker=ticker, qty=qty, cur_price=cur_price,
+                  prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
 
-    # ===== TOPUP =====
+    elif mode == "await_stock_price":
+        buy_price = parse_float(user_text)
+        if buy_price is None:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Введи ціну в USD (напр. 150.25 або 150,25):"
+            )
+            set_state(user_id, "await_stock_price",
+                      ticker=state.get("ticker"), qty=state.get("qty"), cur_price=state.get("cur_price"),
+                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+            return
+        ticker = state.get("ticker", "")
+        qty = state.get("qty", 1)
+        cur_price = state.get("cur_price") or buy_price
+        conn = get_db_conn()
+        conn.execute(
+            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (ticker, ticker, qty, buy_price, cur_price, "active",
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+        set_state(user_id, None)
+        pnl = (cur_price - buy_price) * qty
+        sign = "+" if pnl >= 0 else ""
+        msg_text = (
+            f"✅ {ticker} × {qty} додано!\n"
+            f"💵 Куплено: ${buy_price:.2f} → Зараз: ${cur_price:.2f}\n"
+            f"📊 PnL: {sign}${pnl:.2f}"
+        )
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+
+    # ===== ФІНАНСИ / ВИТРАТИ / RECURRING / ALERTS / TARGETS =====
     elif mode == "await_topup":
         try:
             amount_uah = float(user_text.replace(",", "."))
@@ -2722,10 +1922,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_state(user_id, "await_topup", prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
             return
         amount_usd, err = uah_to_usd(amount_uah)
-        if err:
+        if err or amount_usd is None:
             new_prompt = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"❌ {err}"
+                text=f"❌ {err or 'Помилка конвертації.'}"
             )
             set_state(user_id, "await_topup", prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
             return
@@ -2734,26 +1934,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📥 Поповнення: {amount_uah:.0f} грн ≈ {format_usd_uah(amount_usd)}\n\n"
             f"Це реінвест або нове вкладення?"
         )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("💼 Це реінвест", callback_data="topup:reinvest"),
-                InlineKeyboardButton("➕ Нове вкладення", callback_data="topup:new"),
-            ]
-        ])
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb)
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb)
+        await context.bot.send_message(update.effective_chat.id, msg_text)
 
-    # ===== EXPENSE AMOUNT =====
     elif mode == "await_expense_amount":
         try:
             amount_uah = float(user_text.replace(",", "."))
@@ -2778,7 +1960,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       category=category, cat_name=cat_name,
                       prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
             return
-        # Додаємо витрату
         conn = get_db_conn()
         conn.execute(
             "INSERT INTO expenses(amount_uah,amount_usd,category,note,created_at) VALUES(?,?,?,?,?)",
@@ -2795,121 +1976,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_text = (
             f"💸 Витрата записана!\n"
             f"Категорія: {cat_name}\n"
-            f"Сума: {amount_uah:.0f} грн ≈ {format_usd_uah(amount_usd)}\n"
+            f"Сума: {amount_uah:.0f} грн ≈ {format_usd_uah(amount_usд)}\n"
             f"Залишок бюджету: {remaining:.0f} грн"
         )
         bal = get_balance("free_balance_usd")
         msg_text += f"\n💵 Вільний баланс: {format_usd_uah(bal)}"
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb_finance()
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_finance())
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_finance())
+        await context.bot.send_message(update.effective_chat.id, msg_text)
 
-    # ===== ALERT ASSET =====
-    elif mode == "await_alert_asset":
-        asset_name = user_text
-        set_state(user_id, "await_alert_condition", asset_name=asset_name,
-                  prompt_msg_id=None, main_msg_id=main_msg_id)
-        new_prompt = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"🔔 {asset_name}\nВведи умову (вище X або нижче X, де X — число):\nНаприклад: вище 5.5"
-        )
-        set_state(user_id, "await_alert_condition", asset_name=asset_name,
-                  prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-
-    elif mode == "await_alert_condition":
-        asset_name = state.get("asset_name", "")
-        cond_text = user_text.lower()
-        condition = None
-        threshold = None
-        try:
-            parts_c = cond_text.split()
-            if len(parts_c) >= 2:
-                condition = f"📈 {parts_c[0]} X {parts_c[0]}" if "вище" in parts_c[0] else f"📉 {parts_c[0]} X"
-                condition = cond_text
-                threshold = float(parts_c[-1].replace(",", "."))
-        except Exception:
-            pass
-        if threshold is None:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Не вдалось розібрати умову. Спробуй ще раз (наприклад: вище 5.5):"
-            )
-            set_state(user_id, "await_alert_condition", asset_name=asset_name,
-                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO alerts(asset_type,asset_name,condition,threshold,is_active,created_at) VALUES(?,?,?,?,?,?)",
-            ("custom", asset_name, condition, threshold, 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-        msg_text = f"✅ Сповіщення додано!\n{asset_name}: {condition}"
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb_other()
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_other())
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_other())
-
-    # ===== TARGET PRICE =====
-    elif mode == "await_target_price":
-        try:
-            target_price = float(user_text.replace(",", "."))
-        except ValueError:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи ціну числом в USD:"
-            )
-            set_state(user_id, "await_target_price",
-                      condition=state.get("condition"), asset_type=state.get("asset_type"),
-                      asset_id=state.get("asset_id"), asset_name=state.get("asset_name"),
-                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        asset_type = state.get("asset_type")
-        asset_id = state.get("asset_id")
-        asset_name = state.get("asset_name")
-        condition = state.get("condition")
-        conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO price_targets(asset_type,asset_id,asset_name,target_price_usd,condition,is_active,created_at) VALUES(?,?,?,?,?,?,?)",
-            (asset_type, asset_id, asset_name, target_price, condition, 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-        cond_str = "вище" if condition == "above" else "нижче"
-        msg_text = f"✅ Ціль додано!\n{asset_name}: {cond_str} {format_usd_uah(target_price)}"
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb_other()
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_other())
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_other())
-
-    # ===== RECURRING NAME =====
     elif mode == "await_recurring_name":
         parts_r = [p.strip() for p in user_text.split(",")]
         if len(parts_r) < 3:
@@ -2941,18 +2014,76 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         set_state(user_id, None)
         msg_text = f"✅ Регулярну витрату додано!\n{rec_name}: {rec_amount:.0f} грн, кожного {rec_day}-го числа"
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb_recurring()
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_recurring())
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_recurring())
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+
+    elif mode == "await_alert_asset":
+        asset_name = user_text
+        set_state(user_id, "await_alert_condition", asset_name=asset_name,
+                  prompt_msg_id=None, main_msg_id=main_msg_id)
+        new_prompt = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"🔔 {asset_name}\nВведи умову (вище X або нижче X, де X — число):\nНаприклад: вище 5.5"
+        )
+        set_state(user_id, "await_alert_condition", asset_name=asset_name,
+                  prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+
+    elif mode == "await_alert_condition":
+        asset_name = state.get("asset_name", "")
+        cond_text = user_text.lower()
+        threshold = None
+        try:
+            parts_c = cond_text.split()
+            if len(parts_c) >= 2:
+                threshold = float(parts_c[-1].replace(",", "."))
+        except Exception:
+            threshold = None
+        if threshold is None:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Не вдалось розібрати умову. Спробуй ще раз (наприклад: вище 5.5):"
+            )
+            set_state(user_id, "await_alert_condition", asset_name=asset_name,
+                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+            return
+        conn = get_db_conn()
+        conn.execute(
+            "INSERT INTO alerts(asset_type,asset_name,condition,threshold,is_active,created_at) VALUES(?,?,?,?,?,?)",
+            ("custom", asset_name, cond_text, threshold, 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+        set_state(user_id, None)
+        msg_text = f"✅ Сповіщення додано!\n{asset_name}: {cond_text}"
+        await context.bot.send_message(update.effective_chat.id, msg_text)
+
+    elif mode == "await_target_price":
+        try:
+            target_price = float(user_text.replace(",", "."))
+        except ValueError:
+            new_prompt = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Введи ціну числом в USD:"
+            )
+            set_state(user_id, "await_target_price",
+                      condition=state.get("condition"), asset_type=state.get("asset_type"),
+                      asset_id=state.get("asset_id"), asset_name=state.get("asset_name"),
+                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
+            return
+        asset_type = state.get("asset_type")
+        asset_id = state.get("asset_id")
+        asset_name = state.get("asset_name")
+        condition = state.get("condition")
+        conn = get_db_conn()
+        conn.execute(
+            "INSERT INTO price_targets(asset_type,asset_id,asset_name,target_price_usd,condition,is_active,created_at) VALUES(?,?,?,?,?,?,?)",
+            (asset_type, asset_id, asset_name, target_price, condition, 1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+        set_state(user_id, None)
+        cond_str = "вище" if condition == "above" else "нижче"
+        msg_text = f"✅ Ціль додано!\n{asset_name}: {cond_str} {format_usd_uah(target_price)}"
+        await context.bot.send_message(update.effective_chat.id, msg_text)
 
     # ===== STEAM BUY PRICE =====
     elif mode == "await_steam_buyprice":
@@ -2972,7 +2103,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         qty = state.get("qty", 1)
         cur_price = state.get("cur_price", buy_price)
         net_price = calc_net(cur_price)
-
         conn = get_db_conn()
         conn.execute(
             "INSERT INTO steam_items (game, name, quantity, buy_price_usd, current_price_usd, net_price_usd, added_date, status) VALUES (?,?,?,?,?,?,?,?)",
@@ -2982,7 +2112,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         set_state(user_id, None)
-
         pnl = (cur_price - buy_price) * qty
         sign = "+" if pnl >= 0 else ""
         msg_text = (
@@ -2990,193 +2119,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 Куплено: ${buy_price:.2f} × {qty}\n"
             f"📊 Зараз: ${cur_price:.2f} → PnL: {sign}${pnl:.2f}"
         )
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=kb_game(game)
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_game(game))
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text, reply_markup=kb_game(game))
-
-    # ===== STOCK TICKER =====
-    elif mode == "await_stock_ticker":
-        query_text = user_text.upper().strip()
-        matches = search_tickers(query_text)
-        # If exact match go directly to qty
-        if query_text in TICKER_DB or (len(matches) == 1 and matches[0][0] == query_text):
-            ticker = query_text if query_text in TICKER_DB else matches[0][0]
-            set_state(user_id, "await_stock_qty", ticker=ticker, main_msg_id=main_msg_id)
-            prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"📈 {ticker} — {TICKER_DB.get(ticker, '')}\nВведи кількість акцій (напр. 10 або 0,09421):"
-            )
-            set_state(user_id, "await_stock_qty", ticker=ticker, prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
-            if main_msg_id:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=update.effective_chat.id,
-                        message_id=main_msg_id,
-                        text=f"📈 {ticker} обрано. Введи кількість...",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")]])
-                    )
-                except Exception:
-                    pass
-        else:
-            hint = f"🔍 {query_text}" if matches else f"❓ {query_text} — не знайдено, але можна ввести вручну"
-            if matches:
-                hint += " — обери або введи повний тикер:"
-            set_state(user_id, "await_stock_ticker", main_msg_id=main_msg_id)
-            prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=hint,
-                reply_markup=kb_ticker_suggestions(query_text)
-            )
-            set_state(user_id, "await_stock_ticker", prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
-
-    # ===== STOCK QTY =====
-    elif mode == "await_stock_qty":
-        qty = parse_float(user_text)
-        if qty is None:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи число (напр. 10, 0,09421 або 2.5):"
-            )
-            set_state(user_id, "await_stock_qty",
-                      ticker=state.get("ticker"), prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        ticker = state.get("ticker", "")
-        # Fetch current price immediately
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=f"⏳ Перевіряю {ticker} на Yahoo Finance..."
-                )
-            except Exception:
-                pass
-        cur_price = await asyncio.to_thread(fetch_stock_price, ticker)
-
-        price_hint = f"Зараз: ${cur_price:.2f}\n" if cur_price else "Поточну ціну не вдалось отримати\n"
-        kb_cur = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"✅ За поточною (${cur_price:.2f})" if cur_price else "✅ Ціна невідома",
-                callback_data=f"stock_use_cur:{ticker}:{qty}:{cur_price or 0}"
-            )],
-            [InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")],
-        ])
-        set_state(user_id, "await_stock_price", ticker=ticker, qty=qty, cur_price=cur_price, main_msg_id=main_msg_id)
-        prompt = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"📈 {ticker} × {qty}\n{price_hint}💵 За скільки купив? (або натисни кнопку якщо купив за поточною)",
-            reply_markup=kb_cur
-        )
-        set_state(user_id, "await_stock_price", ticker=ticker, qty=qty, cur_price=cur_price,
-                  prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=f"📈 {ticker} × {qty}\n{price_hint}",
-                    reply_markup=kb_cur
-                )
-            except Exception:
-                pass
-
-    # ===== STOCK PRICE =====
-    elif mode == "await_stock_price":
-        buy_price = parse_float(user_text)
-        if buy_price is None:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи ціну в USD (напр. 150.25 або 150,25):"
-            )
-            set_state(user_id, "await_stock_price",
-                      ticker=state.get("ticker"), qty=state.get("qty"), cur_price=state.get("cur_price"),
-                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        ticker = state.get("ticker", "")
-        qty = state.get("qty", 1)
-        cur_price = state.get("cur_price") or buy_price
-
-        conn = get_db_conn()
-        conn.execute(
-            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (ticker, ticker, qty, buy_price, cur_price, "active",
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-
-        pnl = (cur_price - buy_price) * qty
-        sign = "+" if pnl >= 0 else ""
-        msg_text = (
-            f"✅ {ticker} × {qty} додано!\n"
-            f"💵 Куплено: ${buy_price:.2f} → Зараз: ${cur_price:.2f}\n"
-            f"📊 PnL: {sign}${pnl:.2f}"
-        )
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="assets:stocks")]])
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text)
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text)
-
-    # ===== GIFT SELL TON =====
-    elif mode == "await_gift_sell_ton":
-        ton_sell = parse_float(user_text)
-        if ton_sell is None:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи ціну в TON (напр. 150 або 0,5):"
-            )
-            set_state(user_id, "await_gift_sell_ton",
-                      gift_id=state.get("gift_id"),
-                      prompt_msg_id=new_prompt.message_id, main_msg_id=main_msg_id)
-            return
-        gift_id = state.get("gift_id")
-        ton_rate = await asyncio.to_thread(get_ton_to_usd_rate) or 0.0
-        cur_usd = ton_sell * ton_rate
-        net_usd = calc_gift_net(cur_usd)
-
-        conn = get_db_conn()
-        conn.execute(
-            "UPDATE gifts SET status='for_sale', floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
-            (ton_sell, cur_usd, net_usd, gift_id)
-        )
-        conn.commit()
-        conn.close()
-        set_state(user_id, None)
-
-        msg_text = f"✅ Подарунок виставлено на продаж!\n💎 {ton_sell:.1f} TON = ${cur_usd:.2f}\nНетто: ${net_usd:.2f}"
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=msg_text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main:gifts")]])
-                )
-            except Exception:
-                await context.bot.send_message(update.effective_chat.id, msg_text)
-        else:
-            await context.bot.send_message(update.effective_chat.id, msg_text)
+        await context.bot.send_message(update.effective_chat.id, msg_text)
 
     else:
-        # Невідомий стан
         set_state(user_id, None)
         text, kb = kb_main()
         await context.bot.send_message(update.effective_chat.id, text, reply_markup=kb)
@@ -3196,18 +2141,16 @@ async def job_morning_digest(context: ContextTypes.DEFAULT_TYPE):
         gifts_count = conn.execute("SELECT COUNT(*) FROM gifts WHERE status IN ('active','for_sale')").fetchone()[0]
         stocks_count = conn.execute("SELECT COUNT(*) FROM stocks WHERE status='active'").fetchone()[0]
         stock_rows = conn.execute("SELECT quantity, current_price_usd, buy_price_usd FROM stocks WHERE status='active'").fetchall()
-        stocks_val = sum((r["quantity"] or 0) * (r["current_price_usd"] or r["buy_price_usd"] or 0.0) for r in stock_rows)
         conn.close()
+        stocks_val = sum((r["quantity"] or 0) * (r["current_price_usd"] or r["buy_price_usd"] or 0.0) for r in stock_rows)
         gifts_total = get_gifts_net_total()
         cash = get_balance("free_balance_usd")
-
         pnl_str = ""
         if pnl_night is not None:
             sign = "+" if pnl_night >= 0 else ""
             pct_str = f" ({sign}{pnl_night_pct:.1f}%)" if pnl_night_pct is not None else ""
             pnl_str = f"\n📈 За ніч: {sign}{format_usd_uah(pnl_night)}{pct_str}"
-
-        stocks_str = f"\n📈 Акції: {stocks_count} ({format_usd_uah(stocks_val)})" if stocks_count > 0 else ""
+        stocks_str = f"\n📈 Інвестиції: {stocks_count} ({format_usd_uah(stocks_val)})" if stocks_count > 0 else ""
         text = (
             f"🌅 Доброго ранку!\n"
             f"💼 Портфель: {format_usd_uah(portfolio)}"
@@ -3217,8 +2160,6 @@ async def job_morning_digest(context: ContextTypes.DEFAULT_TYPE):
             f"{stocks_str}\n"
             f"💵 Кеш: {format_usd_uah(cash)}"
         )
-
-        # Рекомендації
         recs = []
         conn2 = get_db_conn()
         items = conn2.execute("SELECT * FROM steam_items WHERE status='active' AND buy_price_usd > 0").fetchall()
@@ -3234,7 +2175,6 @@ async def job_morning_digest(context: ContextTypes.DEFAULT_TYPE):
             recs.extend(alerts_fired)
         if recs:
             text += "\n\n🤖 Що варто зробити:\n" + "\n".join(f"• {r}" for r in recs[:5])
-
         await context.bot.send_message(chat_id=ALLOWED_USER, text=text)
     except Exception as e:
         logger.exception("job_morning_digest error: %s", e)
@@ -3252,7 +2192,6 @@ async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         diff = curr_val - prev_val
         pct = (diff / prev_val * 100) if prev_val > 0 else 0.0
         sign = "+" if diff >= 0 else ""
-
         now = datetime.utcnow()
         week_start_dt = now - timedelta(days=now.weekday())
         conn = get_db_conn()
@@ -3266,16 +2205,14 @@ async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
             (week_start_dt.strftime("%Y-%m-%d %H:%M:%S"),)
         ).fetchone()
         conn.close()
-
         best_day_str = ""
         if curr_vals:
             best_day = max(curr_vals, key=lambda x: x["portfolio_usd"])
             best_day_str = f"\n🏆 Найкращий день: {best_day['date']} ({format_usd_uah(best_day['portfolio_usd'])})"
-
         text = (
             f"📅 Тижневий звіт\n\n"
             f"Цей тиждень: {format_usd_uah(curr_val)}\n"
-            f"Минулий тиждень: {format_usd_uah(prev_val)}\n"
+            f"Минулий тиждень: {format_usд_uah(prev_val)}\n"
             f"Зміна: {sign}{format_usd_uah(diff)} ({sign}{pct:.1f}%)\n"
             f"Продано за тиждень: {sold_week['cnt']} предметів\n"
             f"Заробіток: {format_usd_uah(sold_week['profit'])}\n"
@@ -3298,7 +2235,6 @@ async def job_daily_backup(context: ContextTypes.DEFAULT_TYPE):
         os.makedirs(BACKUP_DIR, exist_ok=True)
         backup_name = f"bot_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.db"
         shutil.copy2(DB_FILE, os.path.join(BACKUP_DIR, backup_name))
-        # Видаляємо старі backup старше 7 днів
         cutoff = datetime.utcnow() - timedelta(days=7)
         for fname in os.listdir(BACKUP_DIR):
             fpath = os.path.join(BACKUP_DIR, fname)
@@ -3321,15 +2257,12 @@ async def job_auto_update_prices(context: ContextTypes.DEFAULT_TYPE):
             if price is not None:
                 net = calc_net(price)
                 conn.execute(
-                    "UPDATE steam_items SET current_price_usd=?, net_price_usd=? WHERE id=?",
+                    "UPDATE steam_items SET current_price_usd=?, net_price_usд=? WHERE id=?",
                     (price, net, it["id"])
                 )
         conn.commit()
-
         gifts = conn.execute("SELECT * FROM gifts WHERE status IN ('active','for_sale')").fetchall()
-        nfts = conn.execute("SELECT * FROM nft_tracked WHERE status='tracking'").fetchall()
         conn.close()
-
         ton_rate = await asyncio.to_thread(get_ton_to_usd_rate)
         if ton_rate:
             conn = get_db_conn()
@@ -3338,27 +2271,16 @@ async def job_auto_update_prices(context: ContextTypes.DEFAULT_TYPE):
                 floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, slug)
                 if floor is not None:
                     cur_usd = floor * ton_rate
-                    net_usd = calc_gift_net(cur_usd)
+                    net_usd = calc_gift_net(cur_usд)
                     conn.execute(
-                        "UPDATE gifts SET floor_ton=?, current_usd=?, net_usd=? WHERE id=?",
-                        (floor, cur_usd, net_usd, g["id"])
+                        "UPDATE gifts SET floor_ton=?, current_usд=?, net_usд=? WHERE id=?",
+                        (floor, cur_usд, net_usд, g["id"])
                     )
-            for n in nfts:
-                price_ton = await asyncio.to_thread(fetch_fragment_nft_price_ton, n["slug"])
-                floor = await asyncio.to_thread(fetch_fragment_floor_price_ton, n["collection_slug"])
-                usd_val = (price_ton or floor or 0.0) * ton_rate
-                conn.execute(
-                    "UPDATE nft_tracked SET own_price_ton=?, floor_ton=?, usd_value=? WHERE id=?",
-                    (price_ton, floor, usd_val, n["id"])
-                )
             conn.commit()
             conn.close()
-
-        # Update stocks
         stock_updates = update_all_stocks()
         if stock_updates:
             logger.info("Stocks updated: %s", stock_updates)
-
         alerts_fired = check_price_targets() + check_alerts_db()
         if alerts_fired:
             msg = "🔔 Спрацювали алерти:\n" + "\n".join(alerts_fired)
@@ -3393,7 +2315,7 @@ async def job_check_recurring_expenses(context: ContextTypes.DEFAULT_TYPE):
             add_transaction("expense_auto", r["name"], -amount_usd, amount_uah, "Авто-регулярна")
             await context.bot.send_message(
                 chat_id=ALLOWED_USER,
-                text=f"🔁 Регулярна витрата: {r['name']} — {amount_uah:.0f} грн списано ({format_usd_uah(amount_usd)})"
+                text=f"🔁 Регулярна витрата: {r['name']} — {amount_uah:.0f} грн списано ({format_usд_uah(amount_usd)})"
             )
         logger.info("Recurring expenses checked for day %d", today_day)
     except Exception as e:
@@ -3418,35 +2340,17 @@ def main():
         .build()
     )
 
-    # Handlers
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", start_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # Jobs
     jq = app.job_queue
-
-    # Morning digest 06:00 UTC (09:00 EEST)
     jq.run_daily(job_morning_digest, time=time(hour=6, minute=0, second=0))
-
-    # Weekly report Monday 07:00 UTC
-    jq.run_daily(
-        job_weekly_report,
-        time=time(hour=7, minute=0, second=0),
-        days=(0,),  # Monday
-    )
-
-    # Daily snapshot 23:59 UTC
+    jq.run_daily(job_weekly_report, time=time(hour=7, minute=0, second=0), days=(0,))
     jq.run_daily(job_daily_snapshot, time=time(hour=23, minute=59, second=0))
-
-    # Daily backup 03:00 UTC
     jq.run_daily(job_daily_backup, time=time(hour=3, minute=0, second=0))
-
-    # Auto price update 06:00 UTC
     jq.run_daily(job_auto_update_prices, time=time(hour=6, minute=5, second=0))
-
-    # Check recurring expenses 08:00 UTC
     jq.run_daily(job_check_recurring_expenses, time=time(hour=8, minute=0, second=0))
 
     logger.info("Starting polling...")
@@ -3454,3 +2358,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+       
