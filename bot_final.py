@@ -1587,6 +1587,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await context.bot.send_message(update.effective_chat.id, msg_text)
         return
+        
         stock_id = int(action)
         conn = get_db_conn()
         s = conn.execute("SELECT * FROM stocks WHERE id=? AND status='active'", (stock_id,)).fetchone()
@@ -1924,104 +1925,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             set_state(user_id, "await_stock_ticker", prompt_msg_id=prompt.message_id, main_msg_id=main_msg_id)
 
-    elif mode == "await_stock_qty":
-        qty = parse_float(user_text)
-        if qty is None or qty <= 0:
-            new_prompt = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи число (напр. 10, 0,09421 або 2.5):"
-            )
-            set_state(
-                user_id,
-                "await_stock_qty",
-                ticker=state.get("ticker"),
-                prompt_msg_id=new_prompt.message_id,
-                main_msg_id=main_msg_id,
-            )
-            return
-
-        ticker = state.get("ticker", "")
-
-        # Після кількості переходимо до кроку «скільки предметів»
-        set_state(
-            user_id,
-            "await_stock_items",
-            ticker=ticker,
-            qty=qty,
-            main_msg_id=main_msg_id,
-        )
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"📦 Скільки предметів ти купив для {ticker}? (штук, напр. 1, 2, 10)"
-        )
-        return
-
-    elif mode == "await_stock_items":
-        items = parse_float(user_text)
-        if items is None or items <= 0:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Введи додатну кількість предметів (1, 2, 5...)."
-            )
-            return
-
-        ticker = state.get("ticker", "")
-        qty = state.get("qty")
-
-        if main_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=main_msg_id,
-                    text=f"⏳ Перевіряю {ticker} на Yahoo Finance..."
-                )
-            except Exception:
-                pass
-
-        cur_price = await asyncio.to_thread(fetch_stock_price, ticker)
-        price_hint = f"Зараз: ${cur_price:.2f}\n" if cur_price else "Поточну ціну не вдалось отримати\n"
-        kb_cur = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                f"✅ За поточною (${cur_price:.2f})" if cur_price else "✅ Ціна невідома",
-                callback_data=f"stock_use_cur:{ticker}:{qty}:{items}:{cur_price or 0}"
-            )],
-            [InlineKeyboardButton("◀️ Назад", callback_data="stockaction:add")],
-        ])
-
-        set_state(
-            user_id,
-            "await_stock_price",
-            ticker=ticker,
-            qty=qty,
-            items=items,
-            cur_price=cur_price,
-            main_msg_id=main_msg_id,
-        )
-        prompt = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=(
-                f"📈 {ticker} × {qty}\n"
-                f"📦 Предметів куплено: {items}\n"
-                f"{price_hint}"
-                f"💵 За скільки купив? (або натисни кнопку якщо купив за поточною)"
-            ),
-            reply_markup=kb_cur,
-        )
-        set_state(
-            user_id,
-            "await_stock_price",
-            ticker=ticker,
-            qty=qty,
-            items=items,
-            cur_price=cur_price,
-            prompt_msg_id=prompt.message_id,
-            main_msg_id=main_msg_id,
-        )
-        return
-
     elif mode == "await_stock_price":
         buy_price = parse_float(user_text)
-        if buy_price is None or buy_price <= 0:
+        if buy_price is None:
             new_prompt = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="❌ Введи ціну в USD (напр. 150.25 або 150,25):"
@@ -2031,7 +1937,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "await_stock_price",
                 ticker=state.get("ticker"),
                 qty=state.get("qty"),
-                items=state.get("items"),
                 cur_price=state.get("cur_price"),
                 prompt_msg_id=new_prompt.message_id,
                 main_msg_id=main_msg_id,
@@ -2040,19 +1945,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ticker = state.get("ticker", "")
         qty = state.get("qty", 1)
-        items = state.get("items", qty)
         cur_price = state.get("cur_price") or buy_price
 
         conn = get_db_conn()
-        # ВАЖЛИВО: в таблиці stocks має бути колонка items_count
         conn.execute(
-            "INSERT INTO stocks (ticker, name, quantity, items_count, buy_price_usd, current_price_usd, status, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO stocks (ticker, name, quantity, buy_price_usd, current_price_usd, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (
                 ticker,
                 ticker,
                 qty,
-                items,
                 buy_price,
                 cur_price,
                 "active",
@@ -2068,12 +1970,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sign = "+" if pnl >= 0 else ""
         msg_text = (
             f"✅ {ticker} × {qty} додано!\n"
-            f"📦 Предметів куплено: {items}\n"
             f"💵 Куплено: ${buy_price:.2f} → Зараз: ${cur_price:.2f}\n"
             f"📊 PnL: {sign}${pnl:.2f}"
         )
         await context.bot.send_message(update.effective_chat.id, msg_text)
         return
+
 
     # ===== ФІНАНСИ / ВИТРАТИ / RECURRING / ALERTS / TARGETS =====
     elif mode == "await_topup":
