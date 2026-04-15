@@ -952,6 +952,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     data = query.data
+    logger.info("CALLBACK DATA: %s", data)
+
+    parts = data.split(":")
+    ...
 
     parts = data.split(":")
     section = parts[0]
